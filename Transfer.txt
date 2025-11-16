@@ -1,4 +1,4 @@
-- 1-Information [folder] -> 2.20 MB -> 10/23/2025 3:29 PM -> GitHub [Path: C:\GitHub\kingdomheartsStandards\1-Information]
-- 2-Procedures [folder] -> 388 KB -> 10/15/2025 3:34 PM -> GitHub [Path: C:\GitHub\kingdomheartsStandards\1-Information]
-- 4-Suggestions [folder] -> 2.97 MB -> 10/15/2025 3:34 PM -> GitHub [Path: C:\GitHub\kingdomheartsStandards\1-Information]
-- 5-Experiences [folder] -> 32.0 KB -> 10/15/2025 3:34 PM -> GitHub [Path: C:\GitHub\kingdomheartsStandards\1-Information]
+- 1-Information [folder] -> 3.03 MB -> 10/26/2025 3:28 PM -> GitHub [Path: C:\GitHub\kingdomheartsStandards\1-Information]
+- 2-Procedures [folder] -> 388 KB -> 10/15/2025 3:34 PM -> GitHub [Path: C:\GitHub\kingdomheartsStandards\2-Procedures]
+- 4-Suggestions [folder] -> 3.00 MB -> 11/16/2025 8:03 PM -> GitHub [Path: C:\GitHub\kingdomheartsStandards\4-Suggestions]
+- 5-Experiences [folder] -> 48.0 KB -> 10/23/2025 3:32 PM -> GitHub [Path: C:\GitHub\kingdomheartsStandards\5-Experiences]
