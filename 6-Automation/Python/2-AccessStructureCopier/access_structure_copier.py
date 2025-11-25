@@ -1,12 +1,20 @@
 import os
 import shutil
 import pyodbc
-from tkinter import Tk, filedialog
+from tkinter import Tk, filedialog, simpledialog
 
 def choose_folder(title="Select Folder"):
     Tk().withdraw()
     folder_path = filedialog.askdirectory(title=title)
     return folder_path
+
+def ask_password(db_file):
+    Tk().withdraw()
+    return simpledialog.askstring(
+        "Database Password Required",
+        f"Enter password for:\n{os.path.basename(db_file)}",
+        show='*'
+    )
 
 def copy_access_file(source_file, target_file):
     os.makedirs(os.path.dirname(target_file), exist_ok=True)
@@ -14,9 +22,39 @@ def copy_access_file(source_file, target_file):
     print(f"Copied: {source_file} -> {target_file}")
     return target_file
 
+def connect_with_optional_password(db_file):
+    """
+    Try connecting without a password. If Access requires one,
+    ask the user and retry until success or cancel.
+    """
+    base_conn_str = f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={db_file};"
+
+    # First try without password
+    try:
+        return pyodbc.connect(base_conn_str)
+    except Exception as e:
+        if "Not a valid password" not in str(e) and "password" not in str(e).lower():
+            raise e  # Not a password problem
+
+    # Ask repeatedly for password
+    while True:
+        password = ask_password(db_file)
+        if password is None:
+            raise Exception(f"Password entry cancelled for file: {db_file}")
+
+        conn_str = base_conn_str + f"PWD={password};"
+
+        try:
+            return pyodbc.connect(conn_str)
+        except Exception as e:
+            if "Not a valid password" in str(e) or "password" in str(e).lower():
+                print("Incorrect password. Please try again.")
+                continue
+            else:
+                raise e
+
 def clear_data_and_reset_ids(db_file):
-    conn_str = f'DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={db_file};'
-    conn = pyodbc.connect(conn_str)
+    conn = connect_with_optional_password(db_file)
     cursor = conn.cursor()
 
     # Get all user tables (skip system tables)
@@ -32,7 +70,7 @@ def clear_data_and_reset_ids(db_file):
             cursor.execute(f"ALTER TABLE [{table}] ALTER COLUMN ID COUNTER(1,1)")
             conn.commit()
         except Exception:
-            pass  # Skip if no AutoNumber or different column name
+            pass
 
     conn.close()
     print(f"Data cleared and IDs reset for: {os.path.basename(db_file)}")
@@ -42,7 +80,6 @@ def process_folder_recursive(source_folder, target_folder):
         for file_name in files:
             if file_name.lower().endswith((".accdb", ".mdb")):
                 source_file = os.path.join(root, file_name)
-                # Maintain folder structure in target
                 relative_path = os.path.relpath(root, source_folder)
                 target_file = os.path.join(target_folder, relative_path, file_name)
                 copied_file = copy_access_file(source_file, target_file)
