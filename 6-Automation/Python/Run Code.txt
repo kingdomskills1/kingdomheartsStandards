@@ -3,3 +3,4 @@ python access_structure_copier.py
 python data_collections_autofill.py
 python table_value_dictionary_builder.py
 python read_table_structure.py
+python copy_number_headings.py

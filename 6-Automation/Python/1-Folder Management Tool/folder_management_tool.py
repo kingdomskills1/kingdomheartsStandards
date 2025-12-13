@@ -66,8 +66,8 @@ def print_tree(path, prefix=""):
     for i, file_name in enumerate(files):
         is_last_file = (i == len(files) - 1) and not folders  # last file if no folders follow
         connector = "└── " if is_last_file else "├── "
-        # Change '/' to '\\' for file paths
-        tree_text.insert(tk.END, prefix + connector + file_name.replace('/', '\\') + "\n")
+        # Normalize printed path separator to forward slash for readability
+        tree_text.insert(tk.END, prefix + connector + file_name.replace('\\', '/') + "\n")
 
     # Print folders after files
     for idx, folder_name in enumerate(folders):
@@ -77,8 +77,8 @@ def print_tree(path, prefix=""):
         if idx > 0 or files:  # blank line if there were files before
             tree_text.insert(tk.END, prefix + "│\n")
 
-        # Change '/' to '\\' for folder paths
-        tree_text.insert(tk.END, prefix + ("└── " if idx == len(folders) - 1 else "├── ") + folder_name.replace('/', '\\') + "\\\n")
+        # Normalize printed path separator to forward slash for readability
+        tree_text.insert(tk.END, prefix + ("└── " if idx == len(folders) - 1 else "├── ") + folder_name.replace('\\', '/') + "/\n")
 
         # Determine new prefix for child items
         new_prefix = prefix + ("    " if idx == len(folders) - 1 else "│   ")
@@ -119,7 +119,7 @@ def print_tree_content():
     if current_folder:  # Check if the folder is selected
         tree_text.delete(1.0, tk.END)  # Clear any existing content
         root_name = os.path.basename(current_folder.rstrip("/\\"))  # Get the root folder name
-        tree_text.insert(tk.END, root_name + "\\\n")  # Print root folder name in tree_text with backslash
+        tree_text.insert(tk.END, root_name + "/\n")  # Print root folder name using forward slash
         print_tree(current_folder)  # Now call print_tree with the current folder path
     else:
         messagebox.showwarning("No folder selected", "Please choose a folder first.")  # Show warning if no folder is selected
