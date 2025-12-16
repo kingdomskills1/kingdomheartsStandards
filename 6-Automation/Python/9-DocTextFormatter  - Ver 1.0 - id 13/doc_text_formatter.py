@@ -462,7 +462,7 @@ update_subfolder_state()  # initialize checkbox state
 # ================= Font Selection =================
 tk.Label(root, text="Font Name:").pack()
 common_fonts = [
-    "Arial", "Calibri", "Times New Roman", "Verdana", "Tahoma",
+    "Roboto Mono", "Arial", "Calibri", "Times New Roman", "Verdana", "Tahoma",
     "Courier New", "Georgia", "Trebuchet MS", "Impact", "Comic Sans MS"
 ]
 font_combobox = ttk.Combobox(root, textvariable=font_name, values=common_fonts)
