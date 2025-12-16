@@ -341,6 +341,93 @@ def apply_styles():
             f"Styles applied to {len(docx_files)} file(s) in the folder:\n{path}"
         )
 
+def apply_text_only():
+    path = file_path.get()
+    if not path:
+        messagebox.showerror("Error", "Please select a file or folder")
+        return
+
+    docx_files = []
+
+    # Gather .docx files
+    if file_or_folder.get() == "file":
+        docx_files = [path]
+    else:  # folder
+        if include_subfolders.get():
+            for root_dir, dirs, files in os.walk(path):
+                for f in files:
+                    if f.lower().endswith(".docx"):
+                        docx_files.append(os.path.join(root_dir, f))
+        else:
+            for f in os.listdir(path):
+                full_path = os.path.join(path, f)
+                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                    docx_files.append(full_path)
+
+    if not docx_files:
+        messagebox.showinfo("Info", "No .docx files found.")
+        return
+
+    # Process each file
+    for file in docx_files:
+        doc = Document(file)
+
+        # Function to check paragraph against filter
+        def paragraph_matches_filter(paragraph):
+            filter_text_value = text_filter.get().strip()
+            filter_option = text_filter_option.get()       # Included / Excluded
+            use_regex = enable_regex.get()                 # regex checkbox
+
+            if not filter_text_value:
+                return True  # no filter, match all
+
+            match_found = False
+            if use_regex:
+                try:
+                    pattern = re.compile(filter_text_value, re.IGNORECASE)
+                    match_found = bool(pattern.search(paragraph.text))
+                except re.error:
+                    match_found = False
+            else:
+                match_found = filter_text_value.lower() in paragraph.text.lower()
+
+            if filter_option == "Included":
+                return match_found
+            elif filter_option == "Excluded":
+                return not match_found
+
+        # Apply text-only changes
+        for paragraph in doc.paragraphs:
+            if paragraph_matches_filter(paragraph):
+                # ---------------- Optionally change font name ----------------
+                for run in paragraph.runs:
+                    # Update font name from GUI
+                    run.font.name = font_name.get()
+                    run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name.get())
+                    # DO NOT change size, bold, italic, underline, color, highlight
+                    # Keep formatting intact
+
+        # Also process tables if needed
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        if paragraph_matches_filter(paragraph):
+                            for run in paragraph.runs:
+                                run.font.name = font_name.get()
+                                run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name.get())
+
+        # Save file
+        doc.save(file)
+
+    # Show one success message
+    if file_or_folder.get() == "file":
+        messagebox.showinfo("Success", f"Text-only changes applied to:\n{docx_files[0]}")
+    else:
+        messagebox.showinfo(
+            "Success",
+            f"Text-only changes applied to {len(docx_files)} file(s) in folder:\n{path}"
+        )
 
 
 # ================= GUI WIDGETS =================
@@ -458,6 +545,9 @@ text_filter_option_menu.current(0)  # default "Included"
 
 # ================= Apply Button =================
 tk.Button(root, text="Apply Styles", command=apply_styles).pack(pady=10)
+
+tk.Button(root, text="Apply Text Only", command=apply_text_only).pack(pady=5)
+
 
 # Initialize states
 update_checkboxes()
