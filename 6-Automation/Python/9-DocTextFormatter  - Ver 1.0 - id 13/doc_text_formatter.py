@@ -91,8 +91,7 @@ def apply_text_style(file_path, font_name, font_size, bold, italic, underline, c
         run.font.italic = italic
         run.font.underline = WD_UNDERLINE.SINGLE if underline else None
         run.font.color.rgb = RGBColor(*color)
-        # Apply highlight (None removes any previous highlight)
-        run.font.highlight_color = highlight
+        run.font.highlight_color = highlight  # None removes any previous highlight
 
     # ---------------- Check if paragraph has an image ----------------
     def paragraph_has_image(paragraph):
@@ -122,12 +121,42 @@ def apply_text_style(file_path, font_name, font_size, bold, italic, underline, c
         elif filter_option == "Excluded":
             return not match_found
 
+    # ---------------- Helper to apply styling to entire paragraph ----------------
+    def apply_to_paragraph(paragraph):
+        for run in paragraph.runs:
+            style_run(run)
+
     # ---------------- Apply Styles Based on Option ----------------
     if option_choice == "Headings Only":
         for paragraph in doc.paragraphs:
             if paragraph.style.name.startswith("Heading") and paragraph_matches_filter(paragraph):
-                for run in paragraph.runs:
-                    style_run(run)
+                apply_to_paragraph(paragraph)
+
+    elif option_choice == "Text and Tables Only":
+        # Normal text (outside tables, not headings, not images)
+        for paragraph in doc.paragraphs:
+            if paragraph.style.name.startswith("Heading"):
+                continue
+            if paragraph_has_image(paragraph):
+                continue
+            in_table = any(
+                paragraph in cell.paragraphs
+                for table in doc.tables
+                for row in table.rows
+                for cell in row.cells
+            )
+            if in_table:
+                continue
+            if paragraph_matches_filter(paragraph):
+                apply_to_paragraph(paragraph)
+
+        # Tables
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        if paragraph_matches_filter(paragraph):
+                            apply_to_paragraph(paragraph)
 
     elif option_choice == "Tables Only":
         for table in doc.tables:
@@ -135,21 +164,18 @@ def apply_text_style(file_path, font_name, font_size, bold, italic, underline, c
                 for cell in row.cells:
                     for paragraph in cell.paragraphs:
                         if paragraph_matches_filter(paragraph):
-                            for run in paragraph.runs:
-                                style_run(run)
+                            apply_to_paragraph(paragraph)
 
     elif option_choice == "Images Only":
         for paragraph in doc.paragraphs:
             if paragraph_has_image(paragraph) and paragraph_matches_filter(paragraph):
-                for run in paragraph.runs:
-                    style_run(run)
+                apply_to_paragraph(paragraph)
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for paragraph in cell.paragraphs:
                         if paragraph_has_image(paragraph) and paragraph_matches_filter(paragraph):
-                            for run in paragraph.runs:
-                                style_run(run)
+                            apply_to_paragraph(paragraph)
 
     elif option_choice == "Text Only":
         for paragraph in doc.paragraphs:
@@ -162,8 +188,7 @@ def apply_text_style(file_path, font_name, font_size, bold, italic, underline, c
             if in_table:
                 continue
             if paragraph_matches_filter(paragraph):
-                for run in paragraph.runs:
-                    style_run(run)
+                apply_to_paragraph(paragraph)
 
     elif option_choice == "All":
         for paragraph in doc.paragraphs:
@@ -172,8 +197,7 @@ def apply_text_style(file_path, font_name, font_size, bold, italic, underline, c
             if paragraph_has_image(paragraph) and not include_images.get():
                 continue
             if paragraph_matches_filter(paragraph):
-                for run in paragraph.runs:
-                    style_run(run)
+                apply_to_paragraph(paragraph)
         if include_tables.get():
             for table in doc.tables:
                 for row in table.rows:
@@ -184,12 +208,11 @@ def apply_text_style(file_path, font_name, font_size, bold, italic, underline, c
                             if paragraph_has_image(paragraph) and not include_images.get():
                                 continue
                             if paragraph_matches_filter(paragraph):
-                                for run in paragraph.runs:
-                                    style_run(run)
+                                apply_to_paragraph(paragraph)
 
     # ---------------- Save ----------------
     doc.save(file_path)
-    # messagebox.showinfo("Success", f"Styles applied to:\n{file_path}")
+    # Success message is optional, can be handled outside this function
 
 
 def on_highlight_select(event=None):
@@ -457,6 +480,37 @@ def apply_text_only():
                 if paragraph_matches_filter(p):
                     apply_font_only(p)
 
+        elif option_var.get() == "Text and Tables Only":
+            # Text outside tables
+            for paragraph in doc.paragraphs:
+                if paragraph.style.name.startswith("Heading"):
+                    continue
+                if paragraph_has_image(paragraph):
+                    continue
+                in_table = any(
+                    paragraph in cell.paragraphs
+                    for table in doc.tables
+                    for row in table.rows
+                    for cell in row.cells
+                )
+                if in_table:
+                    continue
+                if paragraph_matches_filter(paragraph):
+                    for run in paragraph.runs:
+                        run.font.name = font_name.get()
+                        run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name.get())
+
+            # Tables
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            if paragraph_matches_filter(paragraph):
+                                for run in paragraph.runs:
+                                    run.font.name = font_name.get()
+                                    run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name.get())
+
+
         # ===== ALL =====
         elif option_choice == "All":
             for p in doc.paragraphs:
@@ -491,6 +545,658 @@ def apply_text_only():
         messagebox.showinfo(
             "Success",
             f"Text font applied to {len(docx_files)} file(s) in folder:\n{path}"
+        )
+
+def apply_text_size_only():
+    path = file_path.get()
+    if not path:
+        messagebox.showerror("Error", "Please select a file or folder")
+        return
+
+    docx_files = []
+
+    # -------- Collect DOCX files --------
+    if file_or_folder.get() == "file":
+        docx_files = [path]
+    else:
+        if include_subfolders.get():
+            for root_dir, dirs, files in os.walk(path):
+                for f in files:
+                    if f.lower().endswith(".docx"):
+                        docx_files.append(os.path.join(root_dir, f))
+        else:
+            for f in os.listdir(path):
+                full_path = os.path.join(path, f)
+                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                    docx_files.append(full_path)
+
+    if not docx_files:
+        messagebox.showinfo("Info", "No .docx files found.")
+        return
+
+    selected_size = Pt(font_size.get())
+    option_choice = option_var.get()
+
+    # -------- Helpers --------
+    def paragraph_has_image(paragraph):
+        return bool(paragraph._element.xpath('.//pic:pic'))
+
+    def paragraph_matches_filter(paragraph):
+        filter_text_value = text_filter.get().strip()
+        filter_option = text_filter_option.get()
+        use_regex = enable_regex.get()
+
+        if not filter_text_value:
+            return True
+
+        if use_regex:
+            try:
+                pattern = re.compile(filter_text_value, re.IGNORECASE)
+                match_found = bool(pattern.search(paragraph.text))
+            except re.error:
+                return False
+        else:
+            match_found = filter_text_value.lower() in paragraph.text.lower()
+
+        return match_found if filter_option == "Included" else not match_found
+
+    def apply_size_only(paragraph):
+        for run in paragraph.runs:
+            run.font.size = selected_size
+            # DO NOT touch anything else
+
+    # -------- Process files --------
+    for file in docx_files:
+        doc = Document(file)
+
+        # ===== HEADINGS ONLY =====
+        if option_choice == "Headings Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and paragraph_matches_filter(p):
+                    apply_size_only(p)
+
+        # ===== TABLES ONLY =====
+        elif option_choice == "Tables Only":
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_matches_filter(p):
+                                apply_size_only(p)
+
+        # ===== IMAGES ONLY =====
+        elif option_choice == "Images Only":
+            for p in doc.paragraphs:
+                if paragraph_has_image(p) and paragraph_matches_filter(p):
+                    apply_size_only(p)
+
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_has_image(p) and paragraph_matches_filter(p):
+                                apply_size_only(p)
+
+        # ===== TEXT ONLY =====
+        elif option_choice == "Text Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading"):
+                    continue
+                if paragraph_has_image(p):
+                    continue
+
+                in_table = any(
+                    p in cell.paragraphs
+                    for table in doc.tables
+                    for row in table.rows
+                    for cell in row.cells
+                )
+                if in_table:
+                    continue
+
+                if paragraph_matches_filter(p):
+                    apply_size_only(p)
+
+        elif option_var.get() == "Text and Tables Only":
+            for paragraph in doc.paragraphs:
+                if paragraph.style.name.startswith("Heading"):
+                    continue
+                if paragraph_has_image(paragraph):
+                    continue
+                in_table = any(paragraph in cell.paragraphs for table in doc.tables for row in table.rows for cell in row.cells)
+                if in_table:
+                    continue
+                if paragraph_matches_filter(paragraph):
+                    for run in paragraph.runs:
+                        run.font.size = Pt(font_size.get())
+
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            if paragraph_matches_filter(paragraph):
+                                for run in paragraph.runs:
+                                    run.font.size = Pt(font_size.get())
+
+        # ===== ALL =====
+        elif option_choice == "All":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and not include_headings.get():
+                    continue
+                if paragraph_has_image(p) and not include_images.get():
+                    continue
+                if paragraph_matches_filter(p):
+                    apply_size_only(p)
+
+            if include_tables.get():
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for p in cell.paragraphs:
+                                if p.style.name.startswith("Heading") and not include_headings.get():
+                                    continue
+                                if paragraph_has_image(p) and not include_images.get():
+                                    continue
+                                if paragraph_matches_filter(p):
+                                    apply_size_only(p)
+
+        doc.save(file)
+
+    # -------- ONE success message --------
+    if file_or_folder.get() == "file":
+        messagebox.showinfo(
+            "Success",
+            f"Text size applied to:\n{docx_files[0]}"
+        )
+    else:
+        messagebox.showinfo(
+            "Success",
+            f"Text size applied to {len(docx_files)} file(s) in folder:\n{path}"
+        )
+
+def apply_text_style_only():
+    path = file_path.get()
+    if not path:
+        messagebox.showerror("Error", "Please select a file or folder")
+        return
+
+    docx_files = []
+
+    # -------- Collect DOCX files --------
+    if file_or_folder.get() == "file":
+        docx_files = [path]
+    else:
+        if include_subfolders.get():
+            for root_dir, dirs, files in os.walk(path):
+                for f in files:
+                    if f.lower().endswith(".docx"):
+                        docx_files.append(os.path.join(root_dir, f))
+        else:
+            for f in os.listdir(path):
+                full_path = os.path.join(path, f)
+                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                    docx_files.append(full_path)
+
+    if not docx_files:
+        messagebox.showinfo("Info", "No .docx files found.")
+        return
+
+    option_choice = option_var.get()
+
+    # -------- Helpers --------
+    def paragraph_has_image(paragraph):
+        return bool(paragraph._element.xpath('.//pic:pic'))
+
+    def paragraph_matches_filter(paragraph):
+        filter_text_value = text_filter.get().strip()
+        filter_option = text_filter_option.get()
+        use_regex = enable_regex.get()
+
+        if not filter_text_value:
+            return True
+
+        if use_regex:
+            try:
+                pattern = re.compile(filter_text_value, re.IGNORECASE)
+                match_found = bool(pattern.search(paragraph.text))
+            except re.error:
+                return False
+        else:
+            match_found = filter_text_value.lower() in paragraph.text.lower()
+
+        return match_found if filter_option == "Included" else not match_found
+
+    # -------- Apply style ONLY if checkbox is checked --------
+    def apply_style_only(paragraph):
+        for run in paragraph.runs:
+            if bold.get():
+                run.font.bold = True
+            if italic.get():
+                run.font.italic = True
+            if underline.get():
+                run.font.underline = WD_UNDERLINE.SINGLE
+
+    # -------- Process files --------
+    for file in docx_files:
+        doc = Document(file)
+
+        # ===== HEADINGS ONLY =====
+        if option_choice == "Headings Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and paragraph_matches_filter(p):
+                    apply_style_only(p)
+
+        # ===== TABLES ONLY =====
+        elif option_choice == "Tables Only":
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_matches_filter(p):
+                                apply_style_only(p)
+
+        # ===== IMAGES ONLY =====
+        elif option_choice == "Images Only":
+            for p in doc.paragraphs:
+                if paragraph_has_image(p) and paragraph_matches_filter(p):
+                    apply_style_only(p)
+
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_has_image(p) and paragraph_matches_filter(p):
+                                apply_style_only(p)
+
+        # ===== TEXT ONLY =====
+        elif option_choice == "Text Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading"):
+                    continue
+                if paragraph_has_image(p):
+                    continue
+
+                in_table = any(
+                    p in cell.paragraphs
+                    for table in doc.tables
+                    for row in table.rows
+                    for cell in row.cells
+                )
+                if in_table:
+                    continue
+
+                if paragraph_matches_filter(p):
+                    apply_style_only(p)
+        elif option_var.get() == "Text and Tables Only":
+            for paragraph in doc.paragraphs:
+                if paragraph.style.name.startswith("Heading") or paragraph_has_image(paragraph):
+                    continue
+                in_table = any(paragraph in cell.paragraphs for table in doc.tables for row in table.rows for cell in row.cells)
+                if in_table:
+                    continue
+                if paragraph_matches_filter(paragraph):
+                    for run in paragraph.runs:
+                        if bold.get(): run.font.bold = True
+                        if italic.get(): run.font.italic = True
+                        if underline.get(): run.font.underline = WD_UNDERLINE.SINGLE
+
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            if paragraph_matches_filter(paragraph):
+                                for run in paragraph.runs:
+                                    if bold.get(): run.font.bold = True
+                                    if italic.get(): run.font.italic = True
+                                    if underline.get(): run.font.underline = WD_UNDERLINE.SINGLE
+        elif option_var.get() == "Text and Tables Only":
+            for paragraph in doc.paragraphs:
+                if paragraph.style.name.startswith("Heading") or paragraph_has_image(paragraph):
+                    continue
+                in_table = any(paragraph in cell.paragraphs for table in doc.tables for row in table.rows for cell in row.cells)
+                if in_table:
+                    continue
+                if paragraph_matches_filter(paragraph):
+                    for run in paragraph.runs:
+                        run.font.color.rgb = RGBColor(*text_color)
+
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            if paragraph_matches_filter(paragraph):
+                                for run in paragraph.runs:
+                                    run.font.color.rgb = RGBColor(*text_color)
+  
+        # ===== ALL =====
+        elif option_choice == "All":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and not include_headings.get():
+                    continue
+                if paragraph_has_image(p) and not include_images.get():
+                    continue
+                if paragraph_matches_filter(p):
+                    apply_style_only(p)
+
+            if include_tables.get():
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for p in cell.paragraphs:
+                                if p.style.name.startswith("Heading") and not include_headings.get():
+                                    continue
+                                if paragraph_has_image(p) and not include_images.get():
+                                    continue
+                                if paragraph_matches_filter(p):
+                                    apply_style_only(p)
+
+        doc.save(file)
+
+    # -------- ONE success message --------
+    if file_or_folder.get() == "file":
+        messagebox.showinfo(
+            "Success",
+            f"Text style applied to:\n{docx_files[0]}"
+        )
+    else:
+        messagebox.showinfo(
+            "Success",
+            f"Text style applied to {len(docx_files)} file(s) in folder:\n{path}"
+        )
+
+def apply_text_color_only():
+    path = file_path.get()
+    if not path:
+        messagebox.showerror("Error", "Please select a file or folder")
+        return
+
+    docx_files = []
+
+    # -------- Collect DOCX files --------
+    if file_or_folder.get() == "file":
+        docx_files = [path]
+    else:
+        if include_subfolders.get():
+            for root_dir, dirs, files in os.walk(path):
+                for f in files:
+                    if f.lower().endswith(".docx"):
+                        docx_files.append(os.path.join(root_dir, f))
+        else:
+            for f in os.listdir(path):
+                full_path = os.path.join(path, f)
+                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                    docx_files.append(full_path)
+
+    if not docx_files:
+        messagebox.showinfo("Info", "No .docx files found.")
+        return
+
+    option_choice = option_var.get()
+
+    # -------- Helpers --------
+    def paragraph_has_image(paragraph):
+        return bool(paragraph._element.xpath('.//pic:pic'))
+
+    def paragraph_matches_filter(paragraph):
+        filter_text_value = text_filter.get().strip()
+        filter_option = text_filter_option.get()
+        use_regex = enable_regex.get()
+
+        if not filter_text_value:
+            return True
+
+        if use_regex:
+            try:
+                pattern = re.compile(filter_text_value, re.IGNORECASE)
+                match_found = bool(pattern.search(paragraph.text))
+            except re.error:
+                return False
+        else:
+            match_found = filter_text_value.lower() in paragraph.text.lower()
+
+        return match_found if filter_option == "Included" else not match_found
+
+    # -------- Apply COLOR ONLY --------
+    def apply_color_only(paragraph):
+        for run in paragraph.runs:
+            run.font.color.rgb = RGBColor(*text_color)
+
+    # -------- Process files --------
+    for file in docx_files:
+        doc = Document(file)
+
+        # ===== HEADINGS ONLY =====
+        if option_choice == "Headings Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and paragraph_matches_filter(p):
+                    apply_color_only(p)
+
+        # ===== TABLES ONLY =====
+        elif option_choice == "Tables Only":
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_matches_filter(p):
+                                apply_color_only(p)
+
+        # ===== IMAGES ONLY =====
+        elif option_choice == "Images Only":
+            for p in doc.paragraphs:
+                if paragraph_has_image(p) and paragraph_matches_filter(p):
+                    apply_color_only(p)
+
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_has_image(p) and paragraph_matches_filter(p):
+                                apply_color_only(p)
+
+        # ===== TEXT ONLY =====
+        elif option_choice == "Text Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading"):
+                    continue
+                if paragraph_has_image(p):
+                    continue
+
+                in_table = any(
+                    p in cell.paragraphs
+                    for table in doc.tables
+                    for row in table.rows
+                    for cell in row.cells
+                )
+                if in_table:
+                    continue
+
+                if paragraph_matches_filter(p):
+                    apply_color_only(p)
+
+        # ===== ALL =====
+        elif option_choice == "All":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and not include_headings.get():
+                    continue
+                if paragraph_has_image(p) and not include_images.get():
+                    continue
+                if paragraph_matches_filter(p):
+                    apply_color_only(p)
+
+            if include_tables.get():
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for p in cell.paragraphs:
+                                if p.style.name.startswith("Heading") and not include_headings.get():
+                                    continue
+                                if paragraph_has_image(p) and not include_images.get():
+                                    continue
+                                if paragraph_matches_filter(p):
+                                    apply_color_only(p)
+
+        doc.save(file)
+
+    # -------- ONE success message --------
+    if file_or_folder.get() == "file":
+        messagebox.showinfo(
+            "Success",
+            f"Text color applied to:\n{docx_files[0]}"
+        )
+    else:
+        messagebox.showinfo(
+            "Success",
+            f"Text color applied to {len(docx_files)} file(s) in folder:\n{path}"
+        )
+
+def apply_highlight_only():
+    path = file_path.get()
+    if not path:
+        messagebox.showerror("Error", "Please select a file or folder")
+        return
+
+    docx_files = []
+
+    # ---------- Collect DOCX files ----------
+    if file_or_folder.get() == "file":
+        docx_files = [path]
+    else:
+        if include_subfolders.get():
+            for root_dir, dirs, files in os.walk(path):
+                for f in files:
+                    if f.lower().endswith(".docx"):
+                        docx_files.append(os.path.join(root_dir, f))
+        else:
+            for f in os.listdir(path):
+                full_path = os.path.join(path, f)
+                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                    docx_files.append(full_path)
+
+    if not docx_files:
+        messagebox.showinfo("Info", "No .docx files found.")
+        return
+
+    # ---------- Text Filter ----------
+    def paragraph_matches_filter(paragraph):
+        filter_text_value = text_filter.get().strip()
+        filter_option = text_filter_option.get()  # Included / Excluded
+        use_regex = enable_regex.get()
+
+        if not filter_text_value:
+            return True
+
+        match_found = False
+        if use_regex:
+            try:
+                pattern = re.compile(filter_text_value, re.IGNORECASE)
+                match_found = bool(pattern.search(paragraph.text))
+            except re.error:
+                return False
+        else:
+            match_found = filter_text_value.lower() in paragraph.text.lower()
+
+        return match_found if filter_option == "Included" else not match_found
+
+    # ---------- Image Detection ----------
+    def paragraph_has_image(paragraph):
+        return bool(paragraph._element.xpath('.//pic:pic'))
+
+    # ---------- Apply Highlight ----------
+    for file in docx_files:
+        doc = Document(file)
+
+        def apply_to_paragraph(paragraph):
+            if not paragraph_matches_filter(paragraph):
+                return
+            for run in paragraph.runs:
+                run.font.highlight_color = highlight_color  # None removes highlight
+
+        # ===== OPTIONS =====
+        if option_var.get() == "Headings Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading"):
+                    apply_to_paragraph(p)
+
+        elif option_var.get() == "Tables Only":
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            apply_to_paragraph(p)
+
+        elif option_var.get() == "Images Only":
+            for p in doc.paragraphs:
+                if paragraph_has_image(p):
+                    apply_to_paragraph(p)
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_has_image(p):
+                                apply_to_paragraph(p)
+
+        elif option_var.get() == "Text Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading"):
+                    continue
+                if paragraph_has_image(p):
+                    continue
+                in_table = any(
+                    p in cell.paragraphs
+                    for table in doc.tables
+                    for row in table.rows
+                    for cell in row.cells
+                )
+                if not in_table:
+                    apply_to_paragraph(p)
+
+        elif option_var.get() == "Text and Tables Only":
+            for paragraph in doc.paragraphs:
+                if paragraph.style.name.startswith("Heading") or paragraph_has_image(paragraph):
+                    continue
+                in_table = any(paragraph in cell.paragraphs for table in doc.tables for row in table.rows for cell in row.cells)
+                if in_table:
+                    continue
+                if paragraph_matches_filter(paragraph):
+                    for run in paragraph.runs:
+                        run.font.highlight_color = highlight_color
+
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            if paragraph_matches_filter(paragraph):
+                                for run in paragraph.runs:
+                                    run.font.highlight_color = highlight_color
+
+        elif option_var.get() == "All":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and not include_headings.get():
+                    continue
+                if paragraph_has_image(p) and not include_images.get():
+                    continue
+                apply_to_paragraph(p)
+
+            if include_tables.get():
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for p in cell.paragraphs:
+                                if p.style.name.startswith("Heading") and not include_headings.get():
+                                    continue
+                                if paragraph_has_image(p) and not include_images.get():
+                                    continue
+                                apply_to_paragraph(p)
+
+        doc.save(file)
+
+    # ---------- ONE Success Message ----------
+    if file_or_folder.get() == "file":
+        messagebox.showinfo("Success", f"Highlight applied to:\n{docx_files[0]}")
+    else:
+        messagebox.showinfo(
+            "Success",
+            f"Highlight applied to {len(docx_files)} file(s) in folder:\n{path}"
         )
 
 
@@ -549,7 +1255,7 @@ tk.Label(root, text="Apply Options:").pack(pady=5)
 option_menu = ttk.Combobox(
     root,
     textvariable=option_var,
-    values=["All", "Headings Only", "Tables Only", "Images Only", "Text Only"]
+    values=["All", "Headings Only", "Tables Only", "Images Only", "Text Only", "Text and Tables Only"]
 )
 option_menu.pack(pady=5)
 option_menu.bind("<<ComboboxSelected>>", update_checkboxes)
@@ -608,10 +1314,48 @@ text_filter_option_menu.pack(pady=5)
 text_filter_option_menu.current(0)  # default "Included"
 
 # ================= Apply Button =================
-tk.Button(root, text="Apply Styles", command=apply_styles).pack(pady=10)
+tk.Button(root, text="Apply All Styles", command=apply_styles).pack(pady=10)
 
-tk.Button(root, text="Apply Text Only", command=apply_text_only).pack(pady=5)
+# Frame to hold both buttons in one row
+text_buttons_frame = tk.Frame(root)
+text_buttons_frame.pack(pady=5)
 
+# Apply Text Only button
+tk.Button(
+    text_buttons_frame,
+    text="Apply Text font Only",
+    command=apply_text_only,
+    width=20
+).pack(side="left", padx=5)
+
+# Apply Text Size Only button
+tk.Button(
+    text_buttons_frame,
+    text="Apply Text Size Only",
+    command=apply_text_size_only,
+    width=20
+).pack(side="left", padx=5)
+
+tk.Button(
+    text_buttons_frame,
+    text="Apply Text Style Only",
+    command=apply_text_style_only,
+    width=22
+).pack(side="left", padx=5)
+
+tk.Button(
+    text_buttons_frame,
+    text="Apply Text Color Only",
+    command=apply_text_color_only,
+    width=22
+).pack(side="left", padx=5)
+
+tk.Button(
+    text_buttons_frame,
+    text="Apply Highlight Only",
+    command=apply_highlight_only,
+    width=22
+).pack(side="left", padx=5)
 
 # Initialize states
 update_checkboxes()
