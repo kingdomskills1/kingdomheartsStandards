@@ -849,25 +849,6 @@ def apply_text_style_only():
                                     if bold.get(): run.font.bold = True
                                     if italic.get(): run.font.italic = True
                                     if underline.get(): run.font.underline = WD_UNDERLINE.SINGLE
-        elif option_var.get() == "Text and Tables Only":
-            for paragraph in doc.paragraphs:
-                if paragraph.style.name.startswith("Heading") or paragraph_has_image(paragraph):
-                    continue
-                in_table = any(paragraph in cell.paragraphs for table in doc.tables for row in table.rows for cell in row.cells)
-                if in_table:
-                    continue
-                if paragraph_matches_filter(paragraph):
-                    for run in paragraph.runs:
-                        run.font.color.rgb = RGBColor(*text_color)
-
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for paragraph in cell.paragraphs:
-                            if paragraph_matches_filter(paragraph):
-                                for run in paragraph.runs:
-                                    run.font.color.rgb = RGBColor(*text_color)
-  
         # ===== ALL =====
         elif option_choice == "All":
             for p in doc.paragraphs:
@@ -1012,7 +993,24 @@ def apply_text_color_only():
 
                 if paragraph_matches_filter(p):
                     apply_color_only(p)
+        elif option_var.get() == "Text and Tables Only":
+            for paragraph in doc.paragraphs:
+                if paragraph.style.name.startswith("Heading") or paragraph_has_image(paragraph):
+                    continue
+                in_table = any(paragraph in cell.paragraphs for table in doc.tables for row in table.rows for cell in row.cells)
+                if in_table:
+                    continue
+                if paragraph_matches_filter(paragraph):
+                    for run in paragraph.runs:
+                        run.font.color.rgb = RGBColor(*text_color)
 
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            if paragraph_matches_filter(paragraph):
+                                for run in paragraph.runs:
+                                    run.font.color.rgb = RGBColor(*text_color)
         # ===== ALL =====
         elif option_choice == "All":
             for p in doc.paragraphs:
