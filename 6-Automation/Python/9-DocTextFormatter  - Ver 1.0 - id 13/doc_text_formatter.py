@@ -349,10 +349,10 @@ def apply_text_only():
 
     docx_files = []
 
-    # Gather .docx files
+    # ---------------- Collect DOCX files ----------------
     if file_or_folder.get() == "file":
         docx_files = [path]
-    else:  # folder
+    else:
         if include_subfolders.get():
             for root_dir, dirs, files in os.walk(path):
                 for f in files:
@@ -368,65 +368,129 @@ def apply_text_only():
         messagebox.showinfo("Info", "No .docx files found.")
         return
 
-    # Process each file
+    selected_font = font_name.get()
+    option_choice = option_var.get()
+
+    # ---------------- Helpers ----------------
+    def paragraph_has_image(paragraph):
+        return bool(paragraph._element.xpath('.//pic:pic'))
+
+    def paragraph_matches_filter(paragraph):
+        filter_text_value = text_filter.get().strip()
+        filter_option = text_filter_option.get()
+        use_regex = enable_regex.get()
+
+        if not filter_text_value:
+            return True
+
+        if use_regex:
+            try:
+                pattern = re.compile(filter_text_value, re.IGNORECASE)
+                match_found = bool(pattern.search(paragraph.text))
+            except re.error:
+                return False
+        else:
+            match_found = filter_text_value.lower() in paragraph.text.lower()
+
+        return match_found if filter_option == "Included" else not match_found
+
+    def apply_font_only(paragraph):
+        for run in paragraph.runs:
+            run.font.name = selected_font
+            run._element.rPr.rFonts.set(qn('w:eastAsia'), selected_font)
+            # DO NOT touch anything else
+
+    # ---------------- Process files ----------------
     for file in docx_files:
         doc = Document(file)
 
-        # Function to check paragraph against filter
-        def paragraph_matches_filter(paragraph):
-            filter_text_value = text_filter.get().strip()
-            filter_option = text_filter_option.get()       # Included / Excluded
-            use_regex = enable_regex.get()                 # regex checkbox
+        # ===== HEADINGS ONLY =====
+        if option_choice == "Headings Only":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and paragraph_matches_filter(p):
+                    apply_font_only(p)
 
-            if not filter_text_value:
-                return True  # no filter, match all
+        # ===== TABLES ONLY =====
+        elif option_choice == "Tables Only":
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_matches_filter(p):
+                                apply_font_only(p)
 
-            match_found = False
-            if use_regex:
-                try:
-                    pattern = re.compile(filter_text_value, re.IGNORECASE)
-                    match_found = bool(pattern.search(paragraph.text))
-                except re.error:
-                    match_found = False
-            else:
-                match_found = filter_text_value.lower() in paragraph.text.lower()
+        # ===== IMAGES ONLY =====
+        elif option_choice == "Images Only":
+            for p in doc.paragraphs:
+                if paragraph_has_image(p) and paragraph_matches_filter(p):
+                    apply_font_only(p)
 
-            if filter_option == "Included":
-                return match_found
-            elif filter_option == "Excluded":
-                return not match_found
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            if paragraph_has_image(p) and paragraph_matches_filter(p):
+                                apply_font_only(p)
 
-        # Apply text-only changes
-        for paragraph in doc.paragraphs:
-            if paragraph_matches_filter(paragraph):
-                # ---------------- Optionally change font name ----------------
-                for run in paragraph.runs:
-                    # Update font name from GUI
-                    run.font.name = font_name.get()
-                    run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name.get())
-                    # DO NOT change size, bold, italic, underline, color, highlight
-                    # Keep formatting intact
+        # ===== TEXT ONLY =====
+        elif option_choice == "Text Only":
+            for p in doc.paragraphs:
 
-        # Also process tables if needed
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for paragraph in cell.paragraphs:
-                        if paragraph_matches_filter(paragraph):
-                            for run in paragraph.runs:
-                                run.font.name = font_name.get()
-                                run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name.get())
+                # ❌ Skip headings
+                if p.style.name.startswith("Heading"):
+                    continue
 
-        # Save file
+                # ❌ Skip images
+                if paragraph_has_image(p):
+                    continue
+
+                # ❌ Skip tables
+                in_table = any(
+                    p in cell.paragraphs
+                    for table in doc.tables
+                    for row in table.rows
+                    for cell in row.cells
+                )
+                if in_table:
+                    continue
+
+                if paragraph_matches_filter(p):
+                    apply_font_only(p)
+
+        # ===== ALL =====
+        elif option_choice == "All":
+            for p in doc.paragraphs:
+                if p.style.name.startswith("Heading") and not include_headings.get():
+                    continue
+                if paragraph_has_image(p) and not include_images.get():
+                    continue
+                if paragraph_matches_filter(p):
+                    apply_font_only(p)
+
+            if include_tables.get():
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for p in cell.paragraphs:
+                                if p.style.name.startswith("Heading") and not include_headings.get():
+                                    continue
+                                if paragraph_has_image(p) and not include_images.get():
+                                    continue
+                                if paragraph_matches_filter(p):
+                                    apply_font_only(p)
+
         doc.save(file)
 
-    # Show one success message
+    # ---------------- ONE success message ----------------
     if file_or_folder.get() == "file":
-        messagebox.showinfo("Success", f"Text-only changes applied to:\n{docx_files[0]}")
+        messagebox.showinfo(
+            "Success",
+            f"Text font applied to:\n{docx_files[0]}"
+        )
     else:
         messagebox.showinfo(
             "Success",
-            f"Text-only changes applied to {len(docx_files)} file(s) in folder:\n{path}"
+            f"Text font applied to {len(docx_files)} file(s) in folder:\n{path}"
         )
 
 
