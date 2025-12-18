@@ -37,13 +37,13 @@ def extract_headings_from_docx(path: Path) -> List[Tuple[int, str]]:
 
 
 def clean_heading_text(text: str) -> str:
-    # Remove emojis and icons
-    text = re.sub(r'[^\w\s\-:()]', '', text)
+    # Remove emojis and icons but KEEP ?, :, (), -
+    text = re.sub(r'[^\w\s\-:\?\(\)]', '', text)
 
     # Remove leading numbers like "1-", "1.2-", "22-"
     text = re.sub(r'^\s*\d+(\.\d+)*\s*-\s*', '', text)
 
-    # Remove trailing colon ONLY
+    # Remove trailing colon ONLY (keep ?)
     text = re.sub(r':\s*$', '', text)
 
     return text.strip()
