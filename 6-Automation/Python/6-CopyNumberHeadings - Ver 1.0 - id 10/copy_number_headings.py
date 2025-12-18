@@ -113,8 +113,11 @@ class HeadingGUI(tk.Tk):
             numbered = number_headings(headings)
             self.current_numbered = numbered
             self.txt_preview.delete("1.0", tk.END)
-            for num, text in numbered:
-                self.txt_preview.insert(tk.END, f"{num} {text}\n")
+            for level, num, text in numbered:
+                if level == 1:
+                    self.txt_preview.insert(tk.END, f"{num}-{text}\n")
+                else:
+                    self.txt_preview.insert(tk.END, f"   {num}-{text}\n")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to extract headings: {e}")
 
@@ -148,8 +151,11 @@ class HeadingGUI(tk.Tk):
         out_path = Path(out_file)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("w", encoding="utf-8") as f:
-            for num, text in self.current_numbered:
-                f.write(f"{num} {text}\n")
+            for level, num, text in self.current_numbered:
+                if level == 1:
+                    f.write(f"{num}-{text}\n")
+                else:
+                    f.write(f"   {num}-{text}\n")
         messagebox.showinfo("Exported", f"Headings exported to {out_path}")
         # optionally write numbered docx
         if self.chk_write_docx_var.get():

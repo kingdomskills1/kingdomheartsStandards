@@ -7,7 +7,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple
 import argparse
-
+import re
+from docx import Document
+from pathlib import Path
+from typing import List, Tuple
 from docx import Document
 
 
@@ -33,23 +36,39 @@ def extract_headings_from_docx(path: Path) -> List[Tuple[int, str]]:
     return headings
 
 
-def number_headings(headings: List[Tuple[int, str]]) -> List[Tuple[str, str]]:
-    if not headings:
-        return []
-    max_level = max(level for level, _ in headings)
-    counters = [0] * max_level
-    numbered: List[Tuple[str, str]] = []
+def clean_heading_text(text: str) -> str:
+    # remove emojis/icons
+    text = re.sub(r'[^\w\s\-:()]', '', text)
+
+    # remove leading numbers like "1-", "2.3-", "22-"
+    text = re.sub(r'^\s*\d+(\.\d+)*\s*-\s*', '', text)
+
+    return text.strip()
+
+
+def number_headings(headings: List[Tuple[int, str]]) -> List[Tuple[int, str, str]]:
+    """
+    Returns:
+    (level, number_str, cleaned_text)
+    """
+    numbered = []
+
+    top_counter = 0
+    sub_counter = 0
+
     for level, text in headings:
-        if level < 1:
-            level = 1
-        if level > len(counters):
-            counters.extend([0] * (level - len(counters)))
-        counters[level - 1] += 1
-        for i in range(level, len(counters)):
-            counters[i] = 0
-        number_parts = [str(counters[i]) for i in range(level) if counters[i] != 0]
-        number_str = ".".join(number_parts)
-        numbered.append((number_str, text))
+        text = clean_heading_text(text)
+
+        if level == 1:
+            top_counter += 1
+            sub_counter = 0
+            number = str(top_counter)
+        else:
+            sub_counter += 1
+            number = f"{top_counter}.{sub_counter}"
+
+        numbered.append((level, number, text))
+
     return numbered
 
 
@@ -59,39 +78,47 @@ def write_headings_text(out_path: Path, numbered: List[Tuple[str, str]]) -> None
         for num, text in numbered:
             f.write(f"{num} {text}\n")
 
-
-def write_numbered_docx(original: Path, out_path: Path, numbered: List[Tuple[str, str]]) -> None:
+def write_numbered_docx(
+    original: Path,
+    out_path: Path,
+    numbered: List[Tuple[int, str, str]]
+) -> None:
     doc = Document(original)
+
     heading_iter = iter(numbered)
-    next_expected = None
     try:
         next_expected = next(heading_iter)
     except StopIteration:
         next_expected = None
 
     new_doc = Document()
+
     for p in doc.paragraphs:
         style = p.style
         name = getattr(style, "name", "") if style is not None else ""
-        text = p.text
+
         if name.startswith("Heading") and next_expected is not None:
-            num, heading_text = next_expected
-            prefixed = f"{num} {text}" if text else f"{num} {heading_text}"
+            level, num, clean_text = next_expected
+
+            if level == 1:
+                prefixed = f"{num}-{clean_text}"
+            else:
+                prefixed = f"   {num}-{clean_text}"
+
             new_doc.add_paragraph(prefixed, style=name)
-            if text == heading_text:
-                try:
-                    next_expected = next(heading_iter)
-                except StopIteration:
-                    next_expected = None
+
+            try:
+                next_expected = next(heading_iter)
+            except StopIteration:
+                next_expected = None
         else:
             if name:
-                new_doc.add_paragraph(text, style=name)
+                new_doc.add_paragraph(p.text, style=name)
             else:
-                new_doc.add_paragraph(text)
+                new_doc.add_paragraph(p.text)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     new_doc.save(out_path)
-
 
 def process_file(path: Path, out_dir: Path, write_docx: bool) -> None:
     headings = extract_headings_from_docx(path)
