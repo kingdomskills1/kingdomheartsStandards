@@ -99,6 +99,8 @@ class HeadingGUI(tk.Tk):
         if not self.folder_path:
             return
         for p in sorted(self.folder_path.glob("*.docx")):
+            if p.name.startswith("~$"):
+                continue  # skip temporary Word files
             self.files.append(p)
             self.lst_files.insert(tk.END, p.name)
 
@@ -112,12 +114,23 @@ class HeadingGUI(tk.Tk):
             headings = extract_headings_from_docx(path)
             numbered = number_headings(headings)
             self.current_numbered = numbered
+
+            # Detect single top-level heading with subheadings
+            top_level_count = sum(1 for lvl, _, _ in numbered if lvl == 1)
+            has_level2 = any(lvl == 2 for lvl, _, _ in numbered)
+            single_top_with_subs = top_level_count == 0 and has_level2
+
             self.txt_preview.delete("1.0", tk.END)
             for level, num, text in numbered:
-                if level == 1:
+                if single_top_with_subs:
+                    # Flat numbering, no indentation
                     self.txt_preview.insert(tk.END, f"{num}-{text}\n")
                 else:
-                    self.txt_preview.insert(tk.END, f"   {num}-{text}\n")
+                    if level == 1:
+                        self.txt_preview.insert(tk.END, f"{num}-{text}\n")
+                    else:
+                        self.txt_preview.insert(tk.END, f"   {num}-{text}\n")
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to extract headings: {e}")
 
@@ -145,23 +158,36 @@ class HeadingGUI(tk.Tk):
         if not hasattr(self, "current_numbered") or not self.current_numbered:
             messagebox.showinfo("No headings", "No headings to export")
             return
-        out_file = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+
+        # Detect single top-level heading with subheadings
+        top_level_count = sum(1 for lvl, _, _ in self.current_numbered if lvl == 1)
+        has_level2 = any(lvl == 2 for lvl, _, _ in self.current_numbered)
+        single_top_with_subs = top_level_count == 0 and has_level2
+
+        out_file = filedialog.asksaveasfilename(
+            defaultextension=".txt", filetypes=[("Text files", "*.txt")]
+        )
         if not out_file:
             return
+
         out_path = Path(out_file)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+
         with out_path.open("w", encoding="utf-8") as f:
             for level, num, text in self.current_numbered:
-                if level == 1:
-                    f.write(f"{num}-{text}\n")
+                if single_top_with_subs:
+                    f.write(f"{num}-{text}\n")  # no indentation
                 else:
-                    f.write(f"   {num}-{text}\n")
+                    if level == 1:
+                        f.write(f"{num}-{text}\n")
+                    else:
+                        f.write(f"   {num}-{text}\n")
+
         messagebox.showinfo("Exported", f"Headings exported to {out_path}")
-        # optionally write numbered docx
+
+        # Optionally write numbered DOCX
         if self.chk_write_docx_var.get():
             try:
-                # write numbered .docx beside the text file
-                # find the current selected file
                 sel = self.lst_files.curselection()
                 if not sel:
                     return
@@ -172,6 +198,7 @@ class HeadingGUI(tk.Tk):
                 messagebox.showinfo("Docx written", f"Numbered docx written to {docx_out}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to write numbered docx: {e}")
+
 
     def write_numbered_for_current(self):
         sel = self.lst_files.curselection()

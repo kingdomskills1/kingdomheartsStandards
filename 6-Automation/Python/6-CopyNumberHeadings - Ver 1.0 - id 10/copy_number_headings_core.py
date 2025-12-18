@@ -37,28 +37,59 @@ def extract_headings_from_docx(path: Path) -> List[Tuple[int, str]]:
 
 
 def clean_heading_text(text: str) -> str:
-    # remove emojis/icons
+    # Remove emojis and icons
     text = re.sub(r'[^\w\s\-:()]', '', text)
 
-    # remove leading numbers like "1-", "2.3-", "22-"
+    # Remove leading numbers like "1-", "1.2-", "22-"
     text = re.sub(r'^\s*\d+(\.\d+)*\s*-\s*', '', text)
+
+    # Remove trailing colon ONLY
+    text = re.sub(r':\s*$', '', text)
 
     return text.strip()
 
 
-def number_headings(headings: List[Tuple[int, str]]) -> List[Tuple[int, str, str]]:
+def number_headings(headings: list[tuple[int, str]]) -> list[tuple[int, str, str]]:
     """
-    Returns:
-    (level, number_str, cleaned_text)
+    Number headings with rules:
+
+    1. Multiple level-1 headings: hierarchical numbering (1, 1.1, 1.2, 2, 2.1, ...)
+    2. Single level-1 heading with subheadings: skip top-level, number subheadings 1,2,3,...
+    3. Single level-1 heading with no subheadings: number it as 1-Heading.
     """
+    # Clean heading text
+    cleaned = [(level, clean_heading_text(text)) for level, text in headings]
+
+    # Count top-level headings
+    level1_count = sum(1 for level, _ in cleaned if level == 1)
+
     numbered = []
 
+    if level1_count == 1:
+        # Extract top-level and subheadings
+        top_heading = None
+        subheadings = []
+
+        for level, text in cleaned:
+            if level == 1 and not top_heading:
+                top_heading = text
+            elif level == 2:
+                subheadings.append(text)
+
+        if not subheadings:
+            # No subheadings → number the top-level heading
+            numbered.append((1, "1", top_heading))
+        else:
+            # Single top-level with subheadings → number subheadings 1,2,3…
+            for i, text in enumerate(subheadings, start=1):
+                numbered.append((2, str(i), text))
+        return numbered
+
+    # Multiple top-level headings → normal hierarchical numbering
     top_counter = 0
     sub_counter = 0
 
-    for level, text in headings:
-        text = clean_heading_text(text)
-
+    for level, text in cleaned:
         if level == 1:
             top_counter += 1
             sub_counter = 0
@@ -81,11 +112,21 @@ def write_headings_text(out_path: Path, numbered: List[Tuple[str, str]]) -> None
 def write_numbered_docx(
     original: Path,
     out_path: Path,
-    numbered: List[Tuple[int, str, str]]
+    numbered: list[tuple[int, str, str]]
 ) -> None:
-    doc = Document(original)
+    """
+    Write numbered DOCX file.
 
+    Rules:
+    1. Multiple top-level headings → hierarchical numbering (1, 1.1, 2, 2.1, ...)
+    2. Single top-level heading with subheadings → number subheadings 1,2,3,... no indentation
+    3. Single top-level heading without subheadings → number as 1-Heading
+    """
+    from docx import Document
+
+    doc = Document(original)
     heading_iter = iter(numbered)
+
     try:
         next_expected = next(heading_iter)
     except StopIteration:
@@ -93,17 +134,28 @@ def write_numbered_docx(
 
     new_doc = Document()
 
+    # Detect if single top-level heading with subheadings
+    top_level_count = sum(1 for lvl, _, _ in numbered if lvl == 1)
+    has_level2 = any(lvl == 2 for lvl, _, _ in numbered)
+    single_top_with_subs = top_level_count == 0 and has_level2
+
     for p in doc.paragraphs:
-        style = p.style
-        name = getattr(style, "name", "") if style is not None else ""
+        style = getattr(p, "style", None)
+        name = getattr(style, "name", "") if style else ""
 
-        if name.startswith("Heading") and next_expected is not None:
-            level, num, clean_text = next_expected
+        if name.startswith("Heading") and next_expected:
+            level, num, text = next_expected
 
-            if level == 1:
-                prefixed = f"{num}-{clean_text}"
+            # Determine indentation
+            if single_top_with_subs:
+                # Flat numbering, no indent
+                prefixed = f"{num}-{text}"
             else:
-                prefixed = f"   {num}-{clean_text}"
+                # Normal hierarchical numbering
+                if level == 1:
+                    prefixed = f"{num}-{text}"
+                else:
+                    prefixed = f"   {num}-{text}"  # 3-space indent
 
             new_doc.add_paragraph(prefixed, style=name)
 
@@ -112,13 +164,12 @@ def write_numbered_docx(
             except StopIteration:
                 next_expected = None
         else:
-            if name:
-                new_doc.add_paragraph(p.text, style=name)
-            else:
-                new_doc.add_paragraph(p.text)
+            # Copy non-heading paragraphs
+            new_doc.add_paragraph(p.text, style=name if name else None)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     new_doc.save(out_path)
+
 
 def process_file(path: Path, out_dir: Path, write_docx: bool) -> None:
     headings = extract_headings_from_docx(path)
@@ -133,14 +184,17 @@ def process_file(path: Path, out_dir: Path, write_docx: bool) -> None:
 
 def process_path(src: Path, out_dir: Path, recursive: bool, pattern: str, write_docx: bool) -> None:
     if src.is_file():
-        process_file(src, out_dir, write_docx)
+        if not src.name.startswith("~$"):
+            process_file(src, out_dir, write_docx)
         return
+
     if recursive:
         matches = src.rglob(pattern)
     else:
         matches = src.glob(pattern)
+
     for p in matches:
-        if p.is_file():
+        if p.is_file() and not p.name.startswith("~$"):
             process_file(p, out_dir / p.parent.relative_to(src), write_docx)
 
 
