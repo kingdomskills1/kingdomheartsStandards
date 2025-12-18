@@ -51,54 +51,73 @@ def clean_heading_text(text: str) -> str:
 
 def number_headings(headings: list[tuple[int, str]]) -> list[tuple[int, str, str]]:
     """
-    Number headings with rules:
+    Custom numbering rules:
 
-    1. Multiple level-1 headings: hierarchical numbering (1, 1.1, 1.2, 2, 2.1, ...)
-    2. Single level-1 heading with subheadings: skip top-level, number subheadings 1,2,3,...
-    3. Single level-1 heading with no subheadings: number it as 1-Heading.
+    CASE A:
+    - Exactly ONE Heading-1
+    - Heading-3+ EXISTS
+    → DROP Heading-1
+    → Promote Heading-2 to top-level (1,2,3…)
+    → Heading-3 becomes X.1, X.2…
+
+    CASE B:
+    - Exactly ONE Heading-1
+    - Only Heading-2
+    → Drop Heading-1, flat numbering
+
+    CASE C:
+    - Multiple Heading-1
+    → Normal hierarchy
     """
-    # Clean heading text
-    cleaned = [(level, clean_heading_text(text)) for level, text in headings]
 
-    # Count top-level headings
-    level1_count = sum(1 for level, _ in cleaned if level == 1)
+    cleaned = [(lvl, clean_heading_text(text)) for lvl, text in headings]
 
-    numbered = []
+    level1_count = sum(1 for lvl, _ in cleaned if lvl == 1)
+    has_h3 = any(lvl >= 3 for lvl, _ in cleaned)
 
-    if level1_count == 1:
-        # Extract top-level and subheadings
-        top_heading = None
-        subheadings = []
+    numbered: list[tuple[int, str, str]] = []
 
-        for level, text in cleaned:
-            if level == 1 and not top_heading:
-                top_heading = text
-            elif level == 2:
-                subheadings.append(text)
+    # ✅ CASE A: ONE H1 + H3 exists → RE-ROOT AT H2
+    if level1_count == 1 and has_h3:
+        top_counter = 0
+        sub_counter = 0
 
-        if not subheadings:
-            # No subheadings → number the top-level heading
-            numbered.append((1, "1", top_heading))
-        else:
-            # Single top-level with subheadings → number subheadings 1,2,3…
-            for i, text in enumerate(subheadings, start=1):
-                numbered.append((2, str(i), text))
+        for lvl, text in cleaned:
+            if lvl == 2:
+                top_counter += 1
+                sub_counter = 0
+                numbered.append((1, str(top_counter), text))
+            elif lvl == 3:
+                sub_counter += 1
+                numbered.append((2, f"{top_counter}.{sub_counter}", text))
+
         return numbered
 
-    # Multiple top-level headings → normal hierarchical numbering
-    top_counter = 0
-    sub_counter = 0
+    # ✅ CASE B: ONE H1 + ONLY H2
+    if level1_count == 1:
+        subs = [text for lvl, text in cleaned if lvl == 2]
 
-    for level, text in cleaned:
-        if level == 1:
-            top_counter += 1
-            sub_counter = 0
-            number = str(top_counter)
-        else:
-            sub_counter += 1
-            number = f"{top_counter}.{sub_counter}"
+        if not subs:
+            top = next(text for lvl, text in cleaned if lvl == 1)
+            return [(1, "1", top)]
 
-        numbered.append((level, number, text))
+        for i, text in enumerate(subs, 1):
+            numbered.append((1, str(i), text))
+        return numbered
+
+    # ✅ CASE C: MULTIPLE H1 → NORMAL HIERARCHY
+    counters = [0, 0, 0, 0]  # H1–H4
+
+    for lvl, text in cleaned:
+        if lvl > 4:
+            continue
+
+        counters[lvl - 1] += 1
+        for i in range(lvl, 4):
+            counters[i] = 0
+
+        num = ".".join(str(counters[i]) for i in range(lvl))
+        numbered.append((lvl, num, text))
 
     return numbered
 
@@ -114,58 +133,33 @@ def write_numbered_docx(
     out_path: Path,
     numbered: list[tuple[int, str, str]]
 ) -> None:
-    """
-    Write numbered DOCX file.
-
-    Rules:
-    1. Multiple top-level headings → hierarchical numbering (1, 1.1, 2, 2.1, ...)
-    2. Single top-level heading with subheadings → number subheadings 1,2,3,... no indentation
-    3. Single top-level heading without subheadings → number as 1-Heading
-    """
     from docx import Document
 
     doc = Document(original)
-    heading_iter = iter(numbered)
-
-    try:
-        next_expected = next(heading_iter)
-    except StopIteration:
-        next_expected = None
-
     new_doc = Document()
 
-    # Detect if single top-level heading with subheadings
-    top_level_count = sum(1 for lvl, _, _ in numbered if lvl == 1)
-    has_level2 = any(lvl == 2 for lvl, _, _ in numbered)
-    single_top_with_subs = top_level_count == 0 and has_level2
+    # Build queues by heading level
+    queues: dict[int, list[tuple[str, str]]] = {}
+    for lvl, num, text in numbered:
+        queues.setdefault(lvl, []).append((num, text))
 
     for p in doc.paragraphs:
         style = getattr(p, "style", None)
         name = getattr(style, "name", "") if style else ""
 
-        if name.startswith("Heading") and next_expected:
-            level, num, text = next_expected
-
-            # Determine indentation
-            if single_top_with_subs:
-                # Flat numbering, no indent
-                prefixed = f"{num}-{text}"
-            else:
-                # Normal hierarchical numbering
-                if level == 1:
-                    prefixed = f"{num}-{text}"
-                else:
-                    prefixed = f"   {num}-{text}"  # 3-space indent
-
-            new_doc.add_paragraph(prefixed, style=name)
-
+        if name.startswith("Heading"):
             try:
-                next_expected = next(heading_iter)
-            except StopIteration:
-                next_expected = None
-        else:
-            # Copy non-heading paragraphs
-            new_doc.add_paragraph(p.text, style=name if name else None)
+                lvl = int(name.split()[-1])
+            except Exception:
+                lvl = 1
+
+            if lvl in queues and queues[lvl]:
+                num, text = queues[lvl].pop(0)
+                indent = "   " * (lvl - 1)
+                new_doc.add_paragraph(f"{indent}{num}-{text}", style=name)
+                continue
+
+        new_doc.add_paragraph(p.text, style=name if name else None)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     new_doc.save(out_path)
