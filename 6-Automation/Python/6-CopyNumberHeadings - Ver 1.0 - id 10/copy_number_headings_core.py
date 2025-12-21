@@ -90,19 +90,25 @@ def number_headings(headings: list[tuple[int, str]]) -> list[tuple[int, str, str
 
     # ✅ CASE A: ONE H1 + H3 exists → RE-ROOT AT H2
     if level1_count == 1 and has_h3:
-        top_counter = 0
-        sub_counter = 0
-
+        counters = [0, 0, 0, 0]  # H1–H4, extendable
         for lvl, text in cleaned:
-            if lvl == 2:
-                top_counter += 1
-                sub_counter = 0
-                numbered.append((1, str(top_counter), text))
-            elif lvl == 3:
-                sub_counter += 1
-                numbered.append((2, f"{top_counter}.{sub_counter}", text))
-
+            if lvl == 1:
+                continue  # drop original H1
+            # Promote H2 to top-level
+            if lvl >= 2:
+                # new level = lvl - 1
+                new_lvl = lvl - 1
+                if new_lvl > len(counters):
+                    # extend counters if deeper
+                    counters.extend([0] * (new_lvl - len(counters)))
+                counters[new_lvl - 1] += 1
+                # reset deeper counters
+                for i in range(new_lvl, len(counters)):
+                    counters[i] = 0
+                num = ".".join(str(counters[i]) for i in range(new_lvl))
+                numbered.append((new_lvl, num, text))
         return numbered
+
 
     # ✅ CASE B: ONE H1 + ONLY H2
     if level1_count == 1:
@@ -131,7 +137,7 @@ def number_headings(headings: list[tuple[int, str]]) -> list[tuple[int, str, str
         numbered.append((lvl, num, text))
 
     return numbered
-
+    
 
 def write_headings_text(out_path: Path, numbered: List[Tuple[str, str]]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)

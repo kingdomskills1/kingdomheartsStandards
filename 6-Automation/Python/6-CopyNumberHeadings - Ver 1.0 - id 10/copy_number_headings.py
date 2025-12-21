@@ -129,7 +129,8 @@ class HeadingGUI(tk.Tk):
                     if level == 1:
                         self.txt_preview.insert(tk.END, f"{num}-{text}\n")
                     else:
-                        self.txt_preview.insert(tk.END, f"   {num}-{text}\n")
+                        indent = "   " * (level - 1)  # 3 spaces per level, top-level has 0 spaces
+                        self.txt_preview.insert(tk.END, f"{indent}{num}-{text}\n")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to extract headings: {e}")
