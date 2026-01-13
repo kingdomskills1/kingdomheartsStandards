@@ -14,7 +14,10 @@ class FindTabGUI:
                 clear_callback=None,
                 matches_only_callback=None,
                 paths_only_callback=None,
-                insert_callback=None):
+                insert_callback=None,
+                remove_line_callback=None,
+                remove_all_line_callback=None):
+        
         self.parent = parent
         self.browse_callback = browse_callback
         self.run_callback = run_callback
@@ -24,6 +27,9 @@ class FindTabGUI:
         self.matches_only_callback = matches_only_callback
         self.paths_only_callback = paths_only_callback
         self.insert_callback = insert_callback
+        self.remove_line_callback = remove_line_callback
+        self.remove_all_line_callback = remove_all_line_callback
+
 
         # ------------------ Variables ------------------
         self.selected_type = tk.StringVar(value="file")
@@ -55,6 +61,9 @@ class FindTabGUI:
         self.insert_repeat_var = tk.IntVar(value=1)
         self.insert_reference_var = tk.StringVar(value="matched_line")  # Matched line or offset line
 
+        # ---------------- Removed Section Variables ----------------
+        self.Remvoed_position_var = tk.StringVar(value="before")
+
         # Build GUI
         self.build_gui()
 
@@ -71,7 +80,7 @@ class FindTabGUI:
         self.canvas.pack(side="left", fill="both", expand=True)
 
         self.frame = tk.Frame(self.canvas)
-        self.canvas.create_window((0,0), window=self.frame, anchor="nw")
+        self.canvas.create_window((0, 0), window=self.frame, anchor="nw")
 
         self.frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(1, width=e.width))
@@ -121,7 +130,7 @@ class FindTabGUI:
 
         # ---- Find Buttons ----
         find_buttons = tk.Frame(parent)
-        find_buttons.grid(row=12, column=0, columnspan=5, sticky="w", padx=10, pady=(5,10))
+        find_buttons.grid(row=12, column=0, columnspan=5, sticky="w", padx=10, pady=(5, 10))
         tk.Button(find_buttons, text="Run Search", command=self.run_callback).pack(side="left")
         tk.Button(find_buttons, text="Matches Only", command=self.matches_only_callback).pack(side="left", padx=5)
         tk.Button(find_buttons, text="Paths Only", command=self.paths_only_callback).pack(side="left", padx=5)
@@ -137,7 +146,7 @@ class FindTabGUI:
 
         # ---------------- 8. Insert ----------------
         tk.Label(parent, text="8. Insert Content (Applied to Found Matches)", font=("Arial", 12, "bold")).grid(
-            row=16, column=0, columnspan=5, padx=10, pady=(20,5), sticky="w"
+            row=16, column=0, columnspan=5, padx=10, pady=(20, 5), sticky="w"
         )
 
         # ---- Position (Before / After) ----
@@ -145,18 +154,14 @@ class FindTabGUI:
         tk.Radiobutton(parent, text="Before", variable=self.insert_position_var, value="before").grid(row=17, column=1, sticky="w")
         tk.Radiobutton(parent, text="After", variable=self.insert_position_var, value="after").grid(row=17, column=2, sticky="w")
 
-        # ---- Line Offset ----
-        tk.Label(parent, text="Line Offset (0 = matched line)").grid(row=18, column=0, padx=10, sticky="w")
-        tk.Spinbox(parent, from_=0, to=100, width=6, textvariable=self.insert_line_offset_var).grid(row=18, column=1, sticky="w")
-
         # ---- Reference Position ----
-        tk.Label(parent, text="Reference Position").grid(row=18, column=2, padx=10, sticky="w")
+        tk.Label(parent, text="Reference Position").grid(row=18, column=0, padx=10, sticky="w")
         self.radio_matched_line = tk.Radiobutton(parent, text="Matched Line",
                                                 variable=self.insert_reference_var, value="matched_line")
-        self.radio_matched_line.grid(row=18, column=3, sticky="w")
+        self.radio_matched_line.grid(row=18, column=1, sticky="w")
         self.radio_offset_line = tk.Radiobutton(parent, text="Matched Content",
                                                 variable=self.insert_reference_var, value="matched_content")
-        self.radio_offset_line.grid(row=18, column=4, sticky="w")
+        self.radio_offset_line.grid(row=18, column=2, sticky="w")
 
         # Callback to enable/disable Reference Position
         def update_reference_position_state(*args):
@@ -167,9 +172,6 @@ class FindTabGUI:
                 self.insert_reference_var.set("offset_line")  # auto-set
             self.radio_matched_line.config(state=state)
             self.radio_offset_line.config(state=state)
-
-        self.insert_line_offset_var.trace_add("write", update_reference_position_state)
-        update_reference_position_state()
 
         # ---- Insert Content Type ----
         tk.Label(parent, text="Insert Type").grid(row=19, column=0, padx=10, sticky="w")
@@ -193,11 +195,48 @@ class FindTabGUI:
         self.button_insert = tk.Button(parent, text="Apply Insert", command=self.insert_callback)
         self.button_insert.grid(row=22, column=0, columnspan=4, padx=10, pady=10, sticky="w")
 
-        # ---------------- 9. Results ----------------
-        tk.Label(parent, text="9. Results", font=("Arial", 12, "bold")).grid(row=23, column=0, sticky="w", padx=10)
+        # ---------------- 9. Remvoed ----------------
+        # ---- Remvoed Content Type ----
+        tk.Label(parent, text="9. Remvoed Content Type (Applied to Found Matches)", font=("Arial", 12, "bold")).grid(
+            row=23, column=0, columnspan=5, padx=10, pady=(20, 5), sticky="w"
+        )
+
+        # ---- Position (Before / After) ----
+        tk.Label(parent, text="Position").grid(row=24, column=0, padx=10, sticky="w")
+        tk.Radiobutton(parent, text="Before", variable=self.Remvoed_position_var, value="before").grid(row=24, column=1, sticky="w")
+        tk.Radiobutton(parent, text="After", variable=self.Remvoed_position_var, value="after").grid(row=24, column=2, sticky="w")
+
+        # Make only columns 2,3,4 expandable, leave 0 and 1 fixed for buttons
+        for col in range(5):
+            if col in (0, 1):  # columns with buttons
+                self.frame.columnconfigure(col, weight=0)
+            else:
+                self.frame.columnconfigure(col, weight=1)
+
+        # ---- Remove / Remove All Line Buttons ----
+        self.button_remove_one = tk.Button(
+            parent, text="Apply Remove Line Space", command=self.remove_line_callback
+        )
+        self.button_remove_one.grid(row=25, column=0, padx=(10, 5), pady=10, sticky="w")
+
+        self.button_remove_all = tk.Button(
+            parent, text="Apply Remove All Line Space", command=self.remove_all_line_callback
+        )
+        self.button_remove_all.grid(row=25, column=1, padx=(5, 10), pady=10, sticky="w")
+
+
+
+        # ---------------- 10. Results ----------------
+        tk.Label(parent, text="1. Results", font=("Arial", 12, "bold")).grid(
+            row=26, column=0, sticky="w", padx=10
+        )
 
         results_frame = tk.Frame(parent)
-        results_frame.grid(row=24, column=0, columnspan=5, sticky="nsew", padx=10, pady=(0,10))
+        results_frame.grid(row=27, column=0, columnspan=5, sticky="nsew", padx=10, pady=(0, 10))
+
+        self.results_label = tk.Label(results_frame, text="", anchor="w", justify="left")
+        self.results_label.pack(fill="both", expand=True)
+
 
         # Vertical scrollbar
         self.results_vscroll = tk.Scrollbar(results_frame, orient="vertical")
@@ -223,11 +262,11 @@ class FindTabGUI:
         self.results_hscroll.config(command=self.text_results.xview)
 
         # ---- Clear Button ----
-        tk.Button(parent, text="Clear Results", command=self.clear_callback).grid(row=25, column=0, columnspan=5, sticky="w", padx=10)
+        tk.Button(parent, text="Clear Results", command=self.clear_callback).grid(row=28, column=0, columnspan=5, sticky="w", padx=10)
 
         # ---------------- Status ----------------
         self.status_label = tk.Label(parent, text="", fg="blue")
-        self.status_label.grid(row=26, column=0, columnspan=5, sticky="w", padx=10)
+        self.status_label.grid(row=30, column=0, columnspan=5, sticky="w", padx=10)
 
 
     # ----------------- SCROLL ADJUST -----------------

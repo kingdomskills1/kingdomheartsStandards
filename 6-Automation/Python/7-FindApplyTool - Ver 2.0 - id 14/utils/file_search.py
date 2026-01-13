@@ -2,24 +2,18 @@ import os
 import re
 from docx import Document
 import fitz  # PyMuPDF for PDFs
-import tkinter as tk
 
-import os
-import re
-from docx import Document
-import fitz  # PyMuPDF
 
 def find_in_file(file_path, search_text, case_sensitive=False, use_regex=False, content_type="all"):
     """
-    Searches for search_text in a given file and returns structured results.
-    
+    Search for text in a file and return structured results.
     Returns:
-        dict with:
-            - 'file_path': str
-            - 'matches': list of tuples (line_number, line_text, [(start, end), ...])
-            - 'file_find_count': int
-            - 'error': str or None
-            - 'unsupported': bool
+        dict:
+            'file_path': str
+            'matches': list of tuples (line_number, line_text, [(start,end), ...])
+            'file_find_count': int
+            'error': str or None
+            'unsupported': bool
     """
     results = {
         "file_path": file_path,
@@ -28,19 +22,22 @@ def find_in_file(file_path, search_text, case_sensitive=False, use_regex=False, 
         "error": None,
         "unsupported": False
     }
-    
+
     try:
         _, ext = os.path.splitext(file_path)
+        ext = ext.lower()
         lines = []
         primary_line_count = 0
-        flags = 0 if case_sensitive else re.IGNORECASE
-
-        if ext.lower() == ".txt":
+        flags = 0 if case_sensitive else re.IGNORECASE  # Handle case insensitivity
+        
+        # ----- TXT -----        
+        if ext == ".txt":
             with open(file_path, "r", encoding="utf-8") as f:
                 lines = [line.rstrip("\n") for line in f]
             primary_line_count = len(lines)
 
-        elif ext.lower() == ".docx":
+        # ----- DOCX -----
+        elif ext == ".docx":
             doc = Document(file_path)
             primary_lines = []
 
@@ -64,7 +61,9 @@ def find_in_file(file_path, search_text, case_sensitive=False, use_regex=False, 
             lines = primary_lines
             primary_line_count = len(lines)
 
-        elif ext.lower() == ".pdf":
+
+        # ----- PDF -----
+        elif ext == ".pdf":
             doc = fitz.open(file_path)
             for page in doc:
                 text = page.get_text()
@@ -76,14 +75,14 @@ def find_in_file(file_path, search_text, case_sensitive=False, use_regex=False, 
             results["unsupported"] = True
             return results
 
-        # --- SEARCH ---
+        # ----- SEARCH -----
         for i, line in enumerate(lines, start=1):
             matches = []
 
             if use_regex:
                 try:
                     matches = [m.span() for m in re.finditer(search_text, line, flags)]
-                except re.error:
+                except re.error as e:
                     continue
             else:
                 search_line = line if case_sensitive else line.lower()
@@ -96,7 +95,7 @@ def find_in_file(file_path, search_text, case_sensitive=False, use_regex=False, 
                     matches.append((idx, idx + len(search_text)))
                     pos = idx + len(search_text)
 
-            if matches and i <= primary_line_count:
+            if matches:
                 results["matches"].append((i, line, matches))
                 results["file_find_count"] += len(matches)
 
@@ -108,9 +107,6 @@ def find_in_file(file_path, search_text, case_sensitive=False, use_regex=False, 
 
 def search_path(path, search_text, selected_type="file", case_sensitive=False, use_regex=False,
                 search_subfolders=False, txt_only=False, doc_only=False, pdf_only=False, content_type="all"):
-    """
-    Searches for text in a file or folder and returns all results as a list.
-    """
     results_list = []
 
     extensions = []
@@ -318,3 +314,140 @@ def run_search_file_paths_only(gui, path, search_text, selected_type="file",
 
     gui.text_results.config(state="disabled")
     gui.text_results.see("1.0")
+
+
+# functions for insert
+# -----------------------------
+# Find text in a single file
+# -----------------------------
+def find_in_file_insert(file_path, search_text, case_sensitive=False, use_regex=False, content_type="all"):
+    """
+    Search for text in a file and return structured results.
+    Returns:
+        dict:
+            'file_path': str
+            'matches': list of tuples (line_number, line_text, [(start,end), ...])
+            'file_find_count': int
+            'error': str or None
+            'unsupported': bool
+    """
+    results = {
+        "file_path": file_path,
+        "matches": [],
+        "file_find_count": 0,
+        "error": None,
+        "unsupported": False
+    }
+
+    try:
+        _, ext = os.path.splitext(file_path)
+        ext = ext.lower()
+        lines = []
+        primary_line_count = 0
+        flags = 0 if case_sensitive else re.IGNORECASE
+
+        # ----- TXT -----
+        if ext == ".txt":
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = [line.rstrip("\n") for line in f]
+            primary_line_count = len(lines)
+
+        # ----- DOCX -----
+        elif ext == ".docx":
+            doc = Document(file_path)
+            primary_lines = []
+
+            if content_type in ("all", "text"):
+                for p in doc.paragraphs:
+                    if p.text.strip() and (content_type != "text" or not (p.style and p.style.name.startswith("Heading"))):
+                        primary_lines.append(p.text)
+
+            if content_type in ("headings", "tables_headings"):
+                for p in doc.paragraphs:
+                    if p.style and p.style.name.startswith("Heading") and p.text.strip():
+                        primary_lines.append(p.text)
+
+            if content_type in ("tables", "tables_headings", "all"):
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                primary_lines.append(cell.text)
+
+            lines = primary_lines
+            primary_line_count = len(lines)
+
+        # ----- PDF -----
+        elif ext == ".pdf":
+            doc = fitz.open(file_path)
+            for page in doc:
+                text = page.get_text()
+                if text:
+                    lines.extend(text.splitlines())
+            primary_line_count = len(lines)
+
+        else:
+            results["unsupported"] = True
+            return results
+
+        # ----- SEARCH -----
+        for i, line in enumerate(lines, start=1):
+            matches = []
+
+            if use_regex:
+                try:
+                    matches = [m.span() for m in re.finditer(search_text, line, flags)]
+                except re.error as e:
+                    continue
+            else:
+                search_line = line if case_sensitive else line.lower()
+                target = search_text if case_sensitive else search_text.lower()
+                pos = 0
+                while True:
+                    idx = search_line.find(target, pos)
+                    if idx == -1:
+                        break
+                    matches.append((idx, idx + len(search_text)))
+                    pos = idx + len(search_text)
+
+            if matches:
+                results["matches"].append((i, line, matches))
+                results["file_find_count"] += len(matches)
+
+    except Exception as e:
+        results["error"] = str(e)
+
+    return results
+
+
+# -----------------------------
+# Search files/folders
+# -----------------------------
+def search_path_insert(path, search_text, selected_type="file", case_sensitive=False, use_regex=False,
+                search_subfolders=False, txt_only=False, doc_only=False, pdf_only=False, content_type="all"):
+    results_list = []
+
+    extensions = []
+    if txt_only: extensions.append(".txt")
+    if doc_only: extensions.append(".docx")
+    if pdf_only: extensions.append(".pdf")
+
+    def file_matches(name):
+        return any(name.lower().endswith(ext) for ext in extensions) if extensions else True
+
+    if selected_type == "file" and os.path.isfile(path):
+        results_list.append(find_in_file_insert(path, search_text, case_sensitive, use_regex, content_type))
+
+    elif selected_type == "folder" and os.path.isdir(path):
+        if search_subfolders:
+            for root, _, files in os.walk(path):
+                for f in files:
+                    if file_matches(f):
+                        results_list.append(find_in_file_insert(os.path.join(root, f), search_text, case_sensitive, use_regex, content_type))
+        else:
+            for f in os.listdir(path):
+                full = os.path.join(path, f)
+                if os.path.isfile(full) and file_matches(f):
+                    results_list.append(find_in_file_insert(full, search_text, case_sensitive, use_regex, content_type))
+
+    return results_list
