@@ -1,9 +1,10 @@
 """GUI for selecting a folder or file, previewing numbered headings, and copying them.
 
-Simple Tkinter-based UI that uses the functions from `copy_number_headings.py`.
+Simple Tkinter-based UI that uses the functions from `copy_number_headings_core.py`.
 """
 from pathlib import Path
 import sys
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -11,7 +12,6 @@ from copy_number_headings_core import (
     extract_headings_from_docx,
     number_headings,
     write_numbered_docx,
-    process_path,
     main as cli_main,
 )
 
@@ -31,16 +31,13 @@ class HeadingGUI(tk.Tk):
         frm_top = ttk.Frame(self)
         frm_top.pack(fill="x", padx=8, pady=8)
 
-        btn_select = ttk.Button(frm_top, text="Select Folder", command=self.select_folder)
-        btn_select.pack(side="left")
+        ttk.Button(frm_top, text="Select Folder", command=self.select_folder).pack(side="left")
 
         self.lbl_folder = ttk.Label(frm_top, text="No folder selected")
         self.lbl_folder.pack(side="left", padx=8)
 
-        btn_refresh = ttk.Button(frm_top, text="Refresh", command=self.refresh_file_list)
-        btn_refresh.pack(side="right")
+        ttk.Button(frm_top, text="Refresh", command=self.refresh_file_list).pack(side="right")
 
-        # Main pane: file list on left, headings preview on right
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
@@ -49,25 +46,34 @@ class HeadingGUI(tk.Tk):
         paned.add(left_frame, weight=1)
         paned.add(right_frame, weight=3)
 
-        lbl_files = ttk.Label(left_frame, text=".docx files")
-        lbl_files.pack(anchor="w")
+        ttk.Label(left_frame, text=".docx files").pack(anchor="w")
 
         self.lst_files = tk.Listbox(left_frame, exportselection=False)
         self.lst_files.pack(fill="both", expand=True)
         self.lst_files.bind("<<ListboxSelect>>", self.on_file_select)
 
-        # Buttons under file list
         frm_left_buttons = ttk.Frame(left_frame)
         frm_left_buttons.pack(fill="x")
-        btn_copy_all = ttk.Button(frm_left_buttons, text="Copy All Headings", command=self.copy_all)
-        btn_copy_all.pack(side="left", padx=4, pady=4)
 
-        btn_export = ttk.Button(frm_left_buttons, text="Export All to File", command=self.export_all)
-        btn_export.pack(side="left", padx=4, pady=4)
+        ttk.Button(
+            frm_left_buttons,
+            text="Copy Clean File Name",
+            command=self.copy_clean_filename
+        ).pack(side="left", padx=4, pady=4)
 
-        # Right: headings preview
-        lbl_preview = ttk.Label(right_frame, text="Headings Preview")
-        lbl_preview.pack(anchor="w")
+        ttk.Button(
+            frm_left_buttons,
+            text="Copy All Headings",
+            command=self.copy_all
+        ).pack(side="left", padx=4, pady=4)
+
+        ttk.Button(
+            frm_left_buttons,
+            text="Export All to File",
+            command=self.export_all
+        ).pack(side="left", padx=4, pady=4)
+
+        ttk.Label(right_frame, text="Headings Preview").pack(anchor="w")
 
         self.txt_preview = tk.Text(right_frame, wrap="word")
         self.txt_preview.pack(fill="both", expand=True)
@@ -75,158 +81,154 @@ class HeadingGUI(tk.Tk):
         frm_right_buttons = ttk.Frame(right_frame)
         frm_right_buttons.pack(fill="x")
 
-        btn_copy_selected = ttk.Button(frm_right_buttons, text="Copy Selected", command=self.copy_selected)
-        btn_copy_selected.pack(side="left", padx=4, pady=4)
+        ttk.Button(
+            frm_right_buttons,
+            text="Copy H1 Only",
+            command=self.copy_h1_only
+        ).pack(side="left", padx=4, pady=4)
+
+        ttk.Button(
+            frm_right_buttons,
+            text="Copy H1 + H2",
+            command=self.copy_h1_h2
+        ).pack(side="left", padx=4, pady=4)
+
+        ttk.Button(
+            frm_right_buttons,
+            text="Copy H1 + H2 + H3",
+            command=self.copy_h1_h2_h3
+        ).pack(side="left", padx=4, pady=4)
+
+        ttk.Button(
+            frm_right_buttons,
+            text="Copy Preview",
+            command=self.copy_preview_for_selected_file
+        ).pack(side="left", padx=4, pady=4)
 
         self.chk_write_docx_var = tk.BooleanVar(value=False)
-        chk_write = ttk.Checkbutton(frm_right_buttons, text="Write numbered .docx when exporting", variable=self.chk_write_docx_var)
-        chk_write.pack(side="left", padx=8)
+        ttk.Checkbutton(
+            frm_right_buttons,
+            text="Write numbered .docx when exporting",
+            variable=self.chk_write_docx_var
+        ).pack(side="left", padx=8)
 
-        btn_write_numbered = ttk.Button(frm_right_buttons, text="Write Numbered Docx", command=self.write_numbered_for_current)
-        btn_write_numbered.pack(side="right", padx=4, pady=4)
+        ttk.Button(
+            frm_right_buttons,
+            text="Write Numbered Docx",
+            command=self.write_numbered_for_current
+        ).pack(side="right", padx=4, pady=4)
 
     def select_folder(self):
         folder = filedialog.askdirectory()
-        if not folder:
-            return
-        self.folder_path = Path(folder)
-        self.lbl_folder.config(text=str(self.folder_path))
-        self.refresh_file_list()
+        if folder:
+            self.folder_path = Path(folder)
+            self.lbl_folder.config(text=str(self.folder_path))
+            self.refresh_file_list()
 
     def refresh_file_list(self):
         self.lst_files.delete(0, tk.END)
-        self.files = []
+        self.files.clear()
         if not self.folder_path:
             return
         for p in sorted(self.folder_path.glob("*.docx")):
-            if p.name.startswith("~$"):
-                continue  # skip temporary Word files
-            self.files.append(p)
-            self.lst_files.insert(tk.END, p.name)
+            if not p.name.startswith("~$"):
+                self.files.append(p)
+                self.lst_files.insert(tk.END, p.name)
 
     def on_file_select(self, event=None):
         sel = self.lst_files.curselection()
         if not sel:
             return
-        idx = sel[0]
-        path = self.files[idx]
-        try:
-            headings = extract_headings_from_docx(path)
-            numbered = number_headings(headings)
-            self.current_numbered = numbered
+        path = self.files[sel[0]]
+        headings = extract_headings_from_docx(path)
+        self.current_numbered = number_headings(headings)
 
-            # Detect single top-level heading with subheadings
-            top_level_count = sum(1 for lvl, _, _ in numbered if lvl == 1)
-            has_level2 = any(lvl == 2 for lvl, _, _ in numbered)
-            single_top_with_subs = top_level_count == 0 and has_level2
+        self.txt_preview.delete("1.0", tk.END)
+        for level, num, text in self.current_numbered:
+            indent = "   " * (level - 1)
+            self.txt_preview.insert(tk.END, f"{indent}{num}-{text}\n")
 
-            self.txt_preview.delete("1.0", tk.END)
-            for level, num, text in numbered:
-                if single_top_with_subs:
-                    # Flat numbering, no indentation
-                    self.txt_preview.insert(tk.END, f"{num}-{text}\n")
-                else:
-                    if level == 1:
-                        self.txt_preview.insert(tk.END, f"{num}-{text}\n")
-                    else:
-                        indent = "   " * (level - 1)  # 3 spaces per level, top-level has 0 spaces
-                        self.txt_preview.insert(tk.END, f"{indent}{num}-{text}\n")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to extract headings: {e}")
-
-    def copy_selected(self):
-        try:
-            sel = self.txt_preview.get(tk.SEL_FIRST, tk.SEL_LAST)
-        except tk.TclError:
-            # no selection: copy current line
-            idx = self.txt_preview.index("insert linestart")
-            sel = self.txt_preview.get(idx, f"{idx} lineend")
+    def copy_clean_filename(self):
+        sel = self.lst_files.curselection()
+        if not sel:
+            return
+        name = re.sub(r'^\s*\d+(?:\.\d+)*\s*-\s*', '', self.files[sel[0]].stem)
         self.clipboard_clear()
-        self.clipboard_append(sel)
-        messagebox.showinfo("Copied", "Selected heading copied to clipboard")
+        self.clipboard_append(name)
+
+    def copy_preview_for_selected_file(self):
+        text = self.txt_preview.get("1.0", tk.END).strip()
+        if text:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+
+    def copy_h1_only(self):
+        self._copy_by_max_level(1, "Heading-1 copied")
+
+    def copy_h1_h2(self):
+        self._copy_by_max_level(2, "Heading-1 & Heading-2 copied")
+
+    def copy_h1_h2_h3(self):
+        self._copy_by_max_level(3, "Heading-1, Heading-2 & Heading-3 copied")
+
+    def _copy_by_max_level(self, max_level: int, msg: str):
+        if not hasattr(self, "current_numbered"):
+            return
+
+        lines = []
+        for level, num, text in self.current_numbered:
+            if level <= max_level:
+                indent = "   " * (level - 1)
+                lines.append(f"{indent}{num}-{text}")
+
+        if not lines:
+            return
+
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(lines))
+        messagebox.showinfo("Copied", msg)
 
     def copy_all(self):
-        all_text = self.txt_preview.get("1.0", tk.END).strip()
-        if not all_text:
-            messagebox.showinfo("No headings", "No headings to copy")
-            return
-        self.clipboard_clear()
-        self.clipboard_append(all_text)
-        messagebox.showinfo("Copied", "All headings copied to clipboard")
+        self.copy_preview_for_selected_file()
 
     def export_all(self):
-        if not hasattr(self, "current_numbered") or not self.current_numbered:
-            messagebox.showinfo("No headings", "No headings to export")
+        if not hasattr(self, "current_numbered"):
             return
 
-        # Detect single top-level heading with subheadings
-        top_level_count = sum(1 for lvl, _, _ in self.current_numbered if lvl == 1)
-        has_level2 = any(lvl == 2 for lvl, _, _ in self.current_numbered)
-        single_top_with_subs = top_level_count == 0 and has_level2
-
         out_file = filedialog.asksaveasfilename(
-            defaultextension=".txt", filetypes=[("Text files", "*.txt")]
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt")]
         )
         if not out_file:
             return
 
-        out_path = Path(out_file)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with out_path.open("w", encoding="utf-8") as f:
+        with open(out_file, "w", encoding="utf-8") as f:
             for level, num, text in self.current_numbered:
-                if single_top_with_subs:
-                    f.write(f"{num}-{text}\n")  # no indentation
-                else:
-                    if level == 1:
-                        f.write(f"{num}-{text}\n")
-                    else:
-                        f.write(f"   {num}-{text}\n")
+                indent = "   " * (level - 1)
+                f.write(f"{indent}{num}-{text}\n")
 
-        messagebox.showinfo("Exported", f"Headings exported to {out_path}")
-
-        # Optionally write numbered DOCX
         if self.chk_write_docx_var.get():
-            try:
-                sel = self.lst_files.curselection()
-                if not sel:
-                    return
-                idx = sel[0]
-                path = self.files[idx]
-                docx_out = out_path.with_suffix("_numbered.docx")
-                write_numbered_docx(path, docx_out, self.current_numbered)
-                messagebox.showinfo("Docx written", f"Numbered docx written to {docx_out}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to write numbered docx: {e}")
-
+            idx = self.lst_files.curselection()[0]
+            write_numbered_docx(
+                self.files[idx],
+                Path(out_file).with_suffix("_numbered.docx"),
+                self.current_numbered
+            )
 
     def write_numbered_for_current(self):
         sel = self.lst_files.curselection()
         if not sel:
-            messagebox.showinfo("No file", "Select a .docx file first")
             return
-        idx = sel[0]
-        path = self.files[idx]
-        if not hasattr(self, "current_numbered") or not self.current_numbered:
-            messagebox.showinfo("No headings", "No headings for selected file")
-            return
-        out_dir = filedialog.askdirectory(title="Select output folder for numbered docx")
+        out_dir = filedialog.askdirectory()
         if not out_dir:
             return
-        out_path = Path(out_dir) / (path.stem + "_numbered.docx")
-        try:
-            write_numbered_docx(path, out_path, self.current_numbered)
-            messagebox.showinfo("Written", f"Numbered docx written to {out_path}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to write numbered docx: {e}")
+        path = self.files[sel[0]]
+        out_path = Path(out_dir) / f"{path.stem}_numbered.docx"
+        write_numbered_docx(path, out_path, self.current_numbered)
 
 
 if __name__ == "__main__":
-    # If CLI arguments are provided, run the CLI entrypoint from the core module.
-    # Otherwise launch the GUI.
     if len(sys.argv) > 1:
         cli_main()
     else:
-        app = HeadingGUI()
-        app.mainloop()
+        HeadingGUI().mainloop()
