@@ -16,6 +16,19 @@ from copy_number_headings_core import (
 )
 
 
+def natural_sort_key(path: Path):
+    """Sort strings with numbers in human order (2 < 10)."""
+    return [
+        int(text) if text.isdigit() else text.lower()
+        for text in re.split(r'(\d+)', path.name)
+    ]
+
+
+def clean_name(text: str) -> str:
+    """Remove leading numbers and dash."""
+    return re.sub(r'^\s*\d+(?:\.\d+)*\s*-\s*', '', text).strip()
+
+
 class HeadingGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -63,6 +76,12 @@ class HeadingGUI(tk.Tk):
 
         ttk.Button(
             frm_left_buttons,
+            text="Copy Clean Folder Name",
+            command=self.copy_clean_folder_name
+        ).pack(side="left", padx=4, pady=4)
+
+        ttk.Button(
+            frm_left_buttons,
             text="Copy All Headings",
             command=self.copy_all
         ).pack(side="left", padx=4, pady=4)
@@ -81,29 +100,10 @@ class HeadingGUI(tk.Tk):
         frm_right_buttons = ttk.Frame(right_frame)
         frm_right_buttons.pack(fill="x")
 
-        ttk.Button(
-            frm_right_buttons,
-            text="Copy H1 Only",
-            command=self.copy_h1_only
-        ).pack(side="left", padx=4, pady=4)
-
-        ttk.Button(
-            frm_right_buttons,
-            text="Copy H1 + H2",
-            command=self.copy_h1_h2
-        ).pack(side="left", padx=4, pady=4)
-
-        ttk.Button(
-            frm_right_buttons,
-            text="Copy H1 + H2 + H3",
-            command=self.copy_h1_h2_h3
-        ).pack(side="left", padx=4, pady=4)
-
-        ttk.Button(
-            frm_right_buttons,
-            text="Copy Preview",
-            command=self.copy_preview_for_selected_file
-        ).pack(side="left", padx=4, pady=4)
+        ttk.Button(frm_right_buttons, text="Copy H1 Only", command=self.copy_h1_only).pack(side="left", padx=4)
+        ttk.Button(frm_right_buttons, text="Copy H1 + H2", command=self.copy_h1_h2).pack(side="left", padx=4)
+        ttk.Button(frm_right_buttons, text="Copy H1 + H2 + H3", command=self.copy_h1_h2_h3).pack(side="left", padx=4)
+        ttk.Button(frm_right_buttons, text="Copy Preview", command=self.copy_preview_for_selected_file).pack(side="left", padx=4)
 
         self.chk_write_docx_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -116,7 +116,7 @@ class HeadingGUI(tk.Tk):
             frm_right_buttons,
             text="Write Numbered Docx",
             command=self.write_numbered_for_current
-        ).pack(side="right", padx=4, pady=4)
+        ).pack(side="right", padx=4)
 
     def select_folder(self):
         folder = filedialog.askdirectory()
@@ -125,12 +125,21 @@ class HeadingGUI(tk.Tk):
             self.lbl_folder.config(text=str(self.folder_path))
             self.refresh_file_list()
 
+    def copy_clean_folder_name(self):
+        if not self.folder_path:
+            return
+        clean = clean_name(self.folder_path.name)
+        self.clipboard_clear()
+        self.clipboard_append(clean)
+        messagebox.showinfo("Copied", "Clean folder name copied")
+
     def refresh_file_list(self):
         self.lst_files.delete(0, tk.END)
         self.files.clear()
         if not self.folder_path:
             return
-        for p in sorted(self.folder_path.glob("*.docx")):
+
+        for p in sorted(self.folder_path.glob("*.docx"), key=natural_sort_key):
             if not p.name.startswith("~$"):
                 self.files.append(p)
                 self.lst_files.insert(tk.END, p.name)
@@ -152,7 +161,7 @@ class HeadingGUI(tk.Tk):
         sel = self.lst_files.curselection()
         if not sel:
             return
-        name = re.sub(r'^\s*\d+(?:\.\d+)*\s*-\s*', '', self.files[sel[0]].stem)
+        name = clean_name(self.files[sel[0]].stem)
         self.clipboard_clear()
         self.clipboard_append(name)
 
