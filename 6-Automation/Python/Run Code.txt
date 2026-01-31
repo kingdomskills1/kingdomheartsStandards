@@ -7,3 +7,7 @@ python copy_number_headings.py
 python find_replace_tool.py
 python word_selection_style_reader.py
 python doc_text_formatter.py
+
+
+Build the .exe
+pyinstaller --onefile --windowed copy_number_headings.py

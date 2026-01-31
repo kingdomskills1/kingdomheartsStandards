@@ -370,28 +370,34 @@ def apply_text_only():
         messagebox.showerror("Error", "Please select a file or folder")
         return
 
-    docx_files = []
+
+    # -------- Helper to validate DOCX files --------
+    def is_valid_docx(file_name):
+        return file_name.lower().endswith(".docx") and not file_name.startswith("~$")
+
 
     # ---------------- Collect DOCX files ----------------
+    docx_files = []
     if file_or_folder.get() == "file":
-        docx_files = [path]
+        if is_valid_docx(os.path.basename(path)):
+            docx_files = [path]
     else:
         if include_subfolders.get():
             for root_dir, dirs, files in os.walk(path):
                 for f in files:
-                    if f.lower().endswith(".docx"):
+                    if is_valid_docx(f):
                         docx_files.append(os.path.join(root_dir, f))
         else:
             for f in os.listdir(path):
                 full_path = os.path.join(path, f)
-                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                if os.path.isfile(full_path) and is_valid_docx(f):
                     docx_files.append(full_path)
 
     if not docx_files:
-        messagebox.showinfo("Info", "No .docx files found.")
+        messagebox.showinfo("Info", "No valid .docx files found.")
         return
 
-    selected_font = font_name.get()
+    selected_size = Pt(font_size.get())
     option_choice = option_var.get()
 
     # ---------------- Helpers ----------------
@@ -418,9 +424,11 @@ def apply_text_only():
         return match_found if filter_option == "Included" else not match_found
 
     def apply_font_only(paragraph):
+        selected_font = font_name.get()  # <-- get font from GUI
         for run in paragraph.runs:
             run.font.name = selected_font
             run._element.rPr.rFonts.set(qn('w:eastAsia'), selected_font)
+
             # DO NOT touch anything else
 
     # ---------------- Process files ----------------
@@ -553,25 +561,29 @@ def apply_text_size_only():
         messagebox.showerror("Error", "Please select a file or folder")
         return
 
-    docx_files = []
+    # -------- Helper to validate DOCX files --------
+    def is_valid_docx(file_name):
+        return file_name.lower().endswith(".docx") and not file_name.startswith("~$")
 
     # -------- Collect DOCX files --------
+    docx_files = []
     if file_or_folder.get() == "file":
-        docx_files = [path]
+        if is_valid_docx(os.path.basename(path)):
+            docx_files = [path]
     else:
         if include_subfolders.get():
             for root_dir, dirs, files in os.walk(path):
                 for f in files:
-                    if f.lower().endswith(".docx"):
+                    if is_valid_docx(f):
                         docx_files.append(os.path.join(root_dir, f))
         else:
             for f in os.listdir(path):
                 full_path = os.path.join(path, f)
-                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                if os.path.isfile(full_path) and is_valid_docx(f):
                     docx_files.append(full_path)
 
     if not docx_files:
-        messagebox.showinfo("Info", "No .docx files found.")
+        messagebox.showinfo("Info", "No valid .docx files found.")
         return
 
     selected_size = Pt(font_size.get())
@@ -719,26 +731,31 @@ def apply_text_style_only():
     if not path:
         messagebox.showerror("Error", "Please select a file or folder")
         return
-
-    docx_files = []
+    
+    # ---------- Helper: valid DOCX ----------
+    def is_valid_docx(filename):
+        return filename.lower().endswith(".docx") and not os.path.basename(filename).startswith("~$")
 
     # -------- Collect DOCX files --------
+    docx_files = []
     if file_or_folder.get() == "file":
-        docx_files = [path]
+        if is_valid_docx(path):
+            docx_files = [path]
     else:
         if include_subfolders.get():
             for root_dir, dirs, files in os.walk(path):
                 for f in files:
-                    if f.lower().endswith(".docx"):
-                        docx_files.append(os.path.join(root_dir, f))
+                    full_path = os.path.join(root_dir, f)
+                    if is_valid_docx(full_path):
+                        docx_files.append(full_path)
         else:
             for f in os.listdir(path):
                 full_path = os.path.join(path, f)
-                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                if os.path.isfile(full_path) and is_valid_docx(full_path):
                     docx_files.append(full_path)
 
     if not docx_files:
-        messagebox.showinfo("Info", "No .docx files found.")
+        messagebox.showinfo("Info", "No valid .docx files found.")
         return
 
     option_choice = option_var.get()
@@ -769,12 +786,17 @@ def apply_text_style_only():
     # -------- Apply style ONLY if checkbox is checked --------
     def apply_style_only(paragraph):
         for run in paragraph.runs:
-            if bold.get():
-                run.font.bold = True
-            if italic.get():
-                run.font.italic = True
-            if underline.get():
-                run.font.underline = WD_UNDERLINE.SINGLE
+            # Bold
+            run.font.bold = True if bold.get() else False
+
+            # Italic
+            run.font.italic = True if italic.get() else False
+
+            # Underline
+            run.font.underline = (
+                WD_UNDERLINE.SINGLE if underline.get() else None
+            )
+
 
     # -------- Process files --------
     for file in docx_files:
@@ -891,25 +913,32 @@ def apply_text_color_only():
         messagebox.showerror("Error", "Please select a file or folder")
         return
 
+    # -------- Helper to validate DOCX files --------
+    def is_valid_docx(file_name):
+        return file_name.lower().endswith(".docx") and not file_name.startswith("~$")
+
     docx_files = []
 
     # -------- Collect DOCX files --------
+    docx_files = []
     if file_or_folder.get() == "file":
-        docx_files = [path]
+        if is_valid_docx(path):
+            docx_files = [path]
     else:
         if include_subfolders.get():
             for root_dir, dirs, files in os.walk(path):
                 for f in files:
-                    if f.lower().endswith(".docx"):
-                        docx_files.append(os.path.join(root_dir, f))
+                    full_path = os.path.join(root_dir, f)
+                    if is_valid_docx(full_path):
+                        docx_files.append(full_path)
         else:
             for f in os.listdir(path):
                 full_path = os.path.join(path, f)
-                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                if os.path.isfile(full_path) and is_valid_docx(full_path):
                     docx_files.append(full_path)
 
     if not docx_files:
-        messagebox.showinfo("Info", "No .docx files found.")
+        messagebox.showinfo("Info", "No valid .docx files found.")
         return
 
     option_choice = option_var.get()
@@ -1056,22 +1085,27 @@ def apply_highlight_only():
     docx_files = []
 
     # ---------- Collect DOCX files ----------
+    def is_valid_docx(filename):
+        return filename.lower().endswith(".docx") and not os.path.basename(filename).startswith("~$")
+
     if file_or_folder.get() == "file":
-        docx_files = [path]
+        if is_valid_docx(path):
+            docx_files = [path]
     else:
         if include_subfolders.get():
             for root_dir, dirs, files in os.walk(path):
                 for f in files:
-                    if f.lower().endswith(".docx"):
-                        docx_files.append(os.path.join(root_dir, f))
+                    full_path = os.path.join(root_dir, f)
+                    if is_valid_docx(full_path):
+                        docx_files.append(full_path)
         else:
             for f in os.listdir(path):
                 full_path = os.path.join(path, f)
-                if os.path.isfile(full_path) and f.lower().endswith(".docx"):
+                if os.path.isfile(full_path) and is_valid_docx(full_path):
                     docx_files.append(full_path)
 
     if not docx_files:
-        messagebox.showinfo("Info", "No .docx files found.")
+        messagebox.showinfo("Info", "No valid .docx files found.")
         return
 
     # ---------- Text Filter ----------

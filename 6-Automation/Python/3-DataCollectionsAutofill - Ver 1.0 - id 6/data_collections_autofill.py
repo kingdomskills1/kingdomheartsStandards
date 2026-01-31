@@ -88,20 +88,43 @@ def get_table_info(connection):
     table_names = get_table_names(cursor)
 
     for table_name in table_names:
-        try:
-            row_count = cursor.execute(f"SELECT COUNT(*) FROM [{table_name}]").fetchone()[0]
-        except:
-            row_count = 0
-
+        # --- Get columns ---
         try:
             cursor.execute(f"SELECT * FROM [{table_name}] WHERE 1=0")
-            col_count = len(cursor.description)
-        except:
+            columns = [col[0] for col in cursor.description]
+            col_count = len(columns)
+        except Exception as e:
+            print(f"⚠ Could not read columns for {table_name}: {e}")
+            columns = []
             col_count = 0
+
+        # --- Count meaningful rows ---
+        try:
+            non_id_columns = [c for c in columns if c.lower() != "id"]
+
+            conditions = []
+            for col in non_id_columns:
+                conditions.append(
+                    f"(IIf(IsNull([{col}]), '', CStr([{col}])) <> '' "
+                    f"AND IIf(IsNull([{col}]), '', CStr([{col}])) <> '0')"
+                )
+
+            if conditions:
+                where_clause = " OR ".join(conditions)
+                query = f"SELECT COUNT(*) FROM [{table_name}] WHERE {where_clause}"
+            else:
+                query = f"SELECT COUNT(*) FROM [{table_name}]"
+
+            row_count = cursor.execute(query).fetchone()[0]
+
+        except Exception as e:
+            print(f"⚠ Row count issue in {table_name}: {e}")
+            row_count = 0
 
         tables.append((table_name, row_count, col_count))
 
     return tables
+
 
 # --- Shorten long names ---
 def shorten_name(name, max_length):
