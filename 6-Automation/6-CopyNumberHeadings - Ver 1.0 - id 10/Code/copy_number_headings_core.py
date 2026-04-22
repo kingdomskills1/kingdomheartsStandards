@@ -40,7 +40,7 @@ def extract_headings_from_docx(path: Path) -> List[Tuple[int, str]]:
 
 def clean_heading_text(text: str) -> str:
     text = re.sub(r'^\s*\d+(?:\.\d+)*\s*-\s*', '', text)
-    text = re.sub(r'[^\w\s\/\?\:\-\(\)]', '', text)
+    text = re.sub(r'[^\w\s\/\?\:\-\(\)#\.]', '', text)  # keep # and .
     text = re.sub(r':\s*$', '', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
