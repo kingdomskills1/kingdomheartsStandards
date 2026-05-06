@@ -78,9 +78,6 @@ class SnipCore:
         self.root.bind("s", self.global_move)
         self.root.bind("d", self.global_move)
 
-
-        self.root.mainloop()
-
     # =========================================================
     # BLUR MODE
     # =========================================================
@@ -307,7 +304,7 @@ class SnipCore:
         tk.Button(bar, text="Redo", command=self.redo_draw).pack(side="left")
         tk.Button(bar, text="Color", command=self.pick_color).pack(side="left")
         tk.Button(bar, text="Save", command=self.save_dialog).pack(side="left")
-
+        tk.Button(bar, text="Open", command=self.open_image_file).pack(side="left")
         # ================= CANVAS =================
         self.canvas_draw = tk.Canvas(self.draw_win, width=w, height=h, bg="white")
         self.canvas_draw.pack()
@@ -1014,3 +1011,37 @@ class SnipCore:
 
         if file_path:
             self.save_draw_result(file_path)
+
+    def open_image_file(self):
+        from tkinter import filedialog
+        from PIL import Image, ImageTk
+
+        file_path = filedialog.askopenfilename(
+            filetypes=[
+                ("Images", "*.png *.jpg *.jpeg *.bmp"),
+                ("All Files", "*.*")
+            ]
+        )
+
+        if not file_path:
+            return
+
+        # load image
+        img = Image.open(file_path)
+        self.image = img
+
+        # reset drawing
+        self.draw_objects.clear()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+
+        # update canvas
+        w, h = img.size
+        self.canvas_draw.config(width=w, height=h)
+
+        self.tk_img = ImageTk.PhotoImage(img)
+
+        self.canvas_draw.delete("all")
+        self.canvas_draw.create_image(0, 0, anchor="nw", image=self.tk_img)
+
+        print("Image loaded ✅")
