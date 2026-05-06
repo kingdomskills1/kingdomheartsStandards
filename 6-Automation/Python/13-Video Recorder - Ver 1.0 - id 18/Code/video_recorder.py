@@ -1,346 +1,627 @@
-import cv2
-import numpy as np
-from mss import mss
-import sounddevice as sd
-from scipy.io.wavfile import write
-from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
-import threading
 import tkinter as tk
 from tkinter import ttk, filedialog
-import time
+import subprocess
+import threading
 import keyboard
 import os
+import re
 
-# =============================
-# GLOBAL STATE
-# =============================
-recording = False
-paused = False
-
-pause_event = threading.Event()
-pause_event.set()
+# ==========================================
+# GLOBALS
+# ==========================================
+recording_process = None
 
 save_folder = ""
-save_format = "mp4"
 
-progress_window = None
-progress_var = None
-progress_label = None
-progress_running = False
+paused = False
 
+segment_index = 0
 
-# =============================
-# DEVICES
-# =============================
-def list_input_devices():
-    devices = sd.query_devices()
-    return [(i, d['name']) for i, d in enumerate(devices) if d['max_input_channels'] > 0]
+segments = []
+
+# ==========================================
+# TIMER GLOBALS
+# ==========================================
+recording_seconds = 0
+timer_running = False
 
 
-def get_device(var):
-    val = var.get()
-    if not val:
-        return None
-    return int(val.split(":")[0])
+# ==========================================
+# GET AUDIO DEVICES
+# ==========================================
+def get_audio_devices():
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-list_devices",
+            "true",
+            "-f",
+            "dshow",
+            "-i",
+            "dummy"
+        ],
+        capture_output=True,
+        text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        startupinfo=startupinfo
+    )
+
+    output = result.stderr
+
+    devices = []
+
+    for line in output.splitlines():
+
+        if "Alternative name" in line:
+            continue
+
+        match = re.search(r'"(.*?)"', line)
+
+        if match:
+
+            name = match.group(1)
+
+            if (
+                "DirectShow audio devices" not in name
+                and
+                "DirectShow video devices" not in name
+            ):
+                devices.append(name)
+
+    return devices
 
 
-# =============================
-# CHOOSE FOLDER
-# =============================
+# ==========================================
+# CHOOSE SAVE FOLDER
+# ==========================================
 def choose_folder():
+
     global save_folder
-    save_folder = filedialog.askdirectory()
-    folder_label.config(text=save_folder if save_folder else "No folder selected")
+
+    folder = filedialog.askdirectory()
+
+    if folder:
+        save_folder = folder
+        folder_label.config(text=save_folder)
 
 
-# =============================
-# AUDIO
-# =============================
-def record_audio(filename, device, samplerate=44100):
-    global recording
+# ==========================================
+# RECORD TIMER
+# ==========================================
+def update_timer():
 
-    audio_data = []
+    global recording_seconds
+    global timer_running
 
-    def callback(indata, frames, time_info, status):
-        if recording and pause_event.is_set():
-            audio_data.append(indata.copy())
+    if timer_running:
 
-    try:
-        with sd.InputStream(device=device, samplerate=samplerate, channels=2, callback=callback):
-            while recording:
-                sd.sleep(50)
-    except:
-        return
+        hrs = recording_seconds // 3600
+        mins = (recording_seconds % 3600) // 60
+        secs = recording_seconds % 60
 
-    if audio_data:
-        audio_data = np.concatenate(audio_data, axis=0)
-        write(filename, samplerate, audio_data)
+        timer_label.config(
+            text=f"⏱ {hrs:02}:{mins:02}:{secs:02}"
+        )
 
+        recording_seconds += 1
 
-# =============================
-# SCREEN
-# =============================
-def record_screen(filename, fps):
-    global recording
-
-    fps = min(int(fps), 30)
-
-    with mss() as sct:
-        monitor = sct.monitors[1]
-        width = monitor["width"]
-        height = monitor["height"]
-
-        fourcc = cv2.VideoWriter_fourcc(*"XVID")
-        out = cv2.VideoWriter(filename, fourcc, fps, (width, height))
-
-        frame_interval = 1.0 / fps
-        next_time = time.perf_counter()
-
-        while recording:
-            if not pause_event.is_set():
-                time.sleep(0.1)
-                next_time = time.perf_counter()
-                continue
-
-            img = sct.grab(monitor)
-            frame = np.array(img)
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-            out.write(frame)
-
-            next_time += frame_interval
-            sleep = next_time - time.perf_counter()
-            if sleep > 0:
-                time.sleep(sleep)
-
-        out.release()
+    root.after(1000, update_timer)
 
 
-# =============================
-# START
-# =============================
+# ==========================================
+# START RECORDING
+# ==========================================
 def start_recording():
-    global recording
 
-    if recording:
+    global recording_process
+    global segment_index
+    global segments
+    global paused
+    global timer_running
+
+    if recording_process:
         return
 
     if not save_folder:
         status_label.config(text="❌ Choose folder first")
         return
 
-    recording = True
-    pause_event.set()
+    audio_device = audio_var.get()
 
-    fps = int(fps_var.get())
-
-    base_video = os.path.join(save_folder, f"screen.avi")
-    audio1_file = os.path.join(save_folder, "audio1.wav")
-    audio2_file = os.path.join(save_folder, "audio2.wav")
-
-    dev1 = get_device(dev1_var)
-    dev2 = get_device(dev2_var)
-
-    threading.Thread(target=record_screen, args=(base_video, fps), daemon=True).start()
-
-    if dev1 is not None:
-        threading.Thread(target=record_audio, args=(audio1_file, dev1), daemon=True).start()
-
-    if dev2 is not None:
-        threading.Thread(target=record_audio, args=(audio2_file, dev2), daemon=True).start()
-
-    status_label.config(text="Recording...")
-
-
-# =============================
-# STOP
-# =============================
-def stop_recording():
-    global recording, progress_running
-
-    if not recording:
+    if not audio_device:
+        status_label.config(text="❌ Select audio device")
         return
 
-    recording = False
-    pause_event.set()
+    filename = f"segment_{segment_index}.mp4"
 
-    status_label.config(text="Processing...")
-
-    fps = int(fps_var.get())
-
-    video_path = os.path.join(save_folder, "screen.avi")
-    output_path = os.path.join(save_folder, f"output.{save_format}")
-
-    video = VideoFileClip(video_path)
-
-    audio_clips = []
-
-    try:
-        audio_clips.append(AudioFileClip(os.path.join(save_folder, "audio1.wav")))
-    except:
-        pass
-
-    try:
-        audio_clips.append(AudioFileClip(os.path.join(save_folder, "audio2.wav")))
-    except:
-        pass
-
-    if len(audio_clips) == 1:
-        final_audio = audio_clips[0]
-    elif len(audio_clips) > 1:
-        final_audio = CompositeAudioClip(audio_clips)
-    else:
-        final_audio = None
-
-    show_loading_window()
-
-    progress_running = True
-    threading.Thread(target=smooth_progress, daemon=True).start()
-
-    if final_audio:
-        duration = video.duration
-        final_audio = final_audio.subclip(0, min(final_audio.duration, duration))
-        video = video.subclip(0, final_audio.duration)
-        final = video.set_audio(final_audio)
-    else:
-        final = video
-
-    final.write_videofile(
-        output_path,
-        fps=fps,
-        logger=None,
-        verbose=False,
-        threads=4,
-        codec="libx264",
-        audio_codec="aac"
+    output_path = os.path.join(
+        save_folder,
+        filename
     )
 
-    progress_running = False
-    set_progress(100, "100%")
+    segments.append(output_path)
 
-    time.sleep(0.3)
+    command = [
 
-    if progress_window:
-        progress_window.destroy()
+        "ffmpeg",
 
-    status_label.config(text=f"Saved ✔ ({save_format})")
+        "-y",
+
+        # ======================================
+        # SCREEN
+        # ======================================
+        "-f", "gdigrab",
+
+        "-draw_mouse", "1",
+
+        "-framerate", "30",
+
+        "-probesize", "10M",
+
+        "-rtbufsize", "512M",
+
+        "-i", "desktop",
+
+        # ======================================
+        # AUDIO
+        # ======================================
+        "-f", "dshow",
+
+        "-audio_buffer_size", "50",
+
+        "-i", f"audio={audio_device}",
+
+        # ======================================
+        # SYNC
+        # ======================================
+        "-use_wallclock_as_timestamps", "1",
+
+        "-fflags", "+genpts",
+
+        "-af", "aresample=async=1",
+
+        # ======================================
+        # VIDEO
+        # ======================================
+        "-c:v", "h264_nvenc",
+
+        "-preset", "p5",
+
+        "-cq", "28",
+
+        "-pix_fmt", "yuv420p",
+
+        # ======================================
+        # AUDIO
+        # ======================================
+        "-c:a", "aac",
+
+        "-b:a", "192k",
+
+        output_path
+    ]
+
+    try:
+
+        # ======================================
+        # HIDE CMD WINDOW
+        # ======================================
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        recording_process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                |
+                subprocess.CREATE_NO_WINDOW
+            ),
+            startupinfo=startupinfo
+        )
+
+        paused = False
+
+        # START TIMER
+        timer_running = True
+
+        status_label.config(
+            text="🔴 Recording..."
+        )
+
+    except Exception as e:
+
+        status_label.config(
+            text=f"❌ Error: {e}"
+        )
 
 
-# =============================
-# FORMAT CHANGE
-# =============================
-def change_format(event):
-    global save_format
-    save_format = format_var.get()
-
-
-# =============================
-# PAUSE
-# =============================
+# ==========================================
+# PAUSE / RESUME
+# ==========================================
 def toggle_pause():
-    global paused
 
-    if not recording:
+    global recording_process
+    global paused
+    global segment_index
+    global timer_running
+
+    # ======================================
+    # RESUME
+    # ======================================
+    if not recording_process:
+
+        start_recording()
+
         return
 
-    paused = not paused
+    # ======================================
+    # PAUSE
+    # ======================================
+    try:
 
-    if paused:
-        pause_event.clear()
-        status_label.config(text="Paused ⏸")
-    else:
-        pause_event.set()
-        status_label.config(text="Recording ▶")
+        recording_process.communicate(
+            input=b'q',
+            timeout=3
+        )
 
+    except:
 
-# =============================
-# PROGRESS UI
-# =============================
-def show_loading_window():
-    global progress_window, progress_var, progress_label
+        try:
+            recording_process.terminate()
+        except:
+            pass
 
-    progress_window = tk.Toplevel(root)
-    progress_window.title("Processing")
-    progress_window.geometry("300x120")
+    recording_process = None
 
-    ttk.Label(progress_window, text="Processing video...").pack(pady=10)
+    paused = True
 
-    progress_var = tk.DoubleVar()
-    ttk.Progressbar(progress_window, variable=progress_var, maximum=100).pack(fill="x", padx=20, pady=10)
+    # PAUSE TIMER
+    timer_running = False
 
-    progress_label = ttk.Label(progress_window, text="0%")
-    progress_label.pack()
+    segment_index += 1
 
-
-def set_progress(value, text):
-    def update():
-        progress_var.set(value)
-        progress_label.config(text=text)
-        progress_window.update()
-
-    root.after(0, update)
+    status_label.config(
+        text="⏸ Paused"
+    )
 
 
-def smooth_progress():
-    percent = 0
+# ==========================================
+# STOP RECORDING
+# ==========================================
+def stop_recording():
 
-    while progress_running and percent < 99:
-        percent += 0.7
-        set_progress(percent, f"{int(percent)}%")
-        time.sleep(0.05)
+    global recording_process
+    global segments
+    global segment_index
+    global paused
+    global timer_running
+    global recording_seconds
+
+    # ======================================
+    # STOP CURRENT SEGMENT
+    # ======================================
+    if recording_process:
+
+        try:
+
+            recording_process.communicate(
+                input=b'q',
+                timeout=3
+            )
+
+        except:
+
+            try:
+                recording_process.terminate()
+            except:
+                pass
+
+        recording_process = None
+
+    # STOP TIMER
+    timer_running = False
+
+    # ======================================
+    # NOTHING TO MERGE
+    # ======================================
+    if not segments:
+
+        status_label.config(
+            text="❌ No recordings found"
+        )
+
+        return
+
+    # ======================================
+    # CONCAT FILE
+    # ======================================
+    concat_file = os.path.join(
+        save_folder,
+        "concat.txt"
+    )
+
+    with open(concat_file, "w", encoding="utf-8") as f:
+
+        for segment in segments:
+
+            fixed = segment.replace("\\", "/")
+
+            f.write(f"file '{fixed}'\n")
+
+    # ======================================
+    # FINAL OUTPUT
+    # ======================================
+    final_output = os.path.join(
+        save_folder,
+        "final_output.mp4"
+    )
+
+    # delete old final
+    if os.path.exists(final_output):
+
+        try:
+            os.remove(final_output)
+        except:
+            pass
+
+    # ======================================
+    # MERGE
+    # ======================================
+    merge_command = [
+
+        "ffmpeg",
+
+        "-y",
+
+        "-f", "concat",
+
+        "-safe", "0",
+
+        "-i", concat_file,
+
+        "-c", "copy",
+
+        final_output
+    ]
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    subprocess.run(
+        merge_command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        startupinfo=startupinfo
+    )
+
+    # ======================================
+    # CLEANUP
+    # ======================================
+    try:
+        os.remove(concat_file)
+    except:
+        pass
+
+    # ======================================
+    # RESET
+    # ======================================
+    segments = []
+
+    segment_index = 0
+
+    paused = False
+
+    recording_seconds = 0
+
+    timer_label.config(
+        text="⏱ 00:00:00"
+    )
+
+    status_label.config(
+        text="✅ Final Video Saved"
+    )
 
 
-# =============================
+# ==========================================
 # HOTKEYS
-# =============================
-keyboard.add_hotkey("ctrl+alt+s", lambda: start_recording())
-keyboard.add_hotkey("ctrl+alt+p", lambda: toggle_pause())
-keyboard.add_hotkey("ctrl+alt+x", lambda: stop_recording())
+# ==========================================
+keyboard.add_hotkey(
+    "ctrl+alt+s",
+    lambda: threading.Thread(
+        target=start_recording
+    ).start()
+)
 
+keyboard.add_hotkey(
+    "ctrl+alt+p",
+    toggle_pause
+)
 
-# =============================
+keyboard.add_hotkey(
+    "ctrl+alt+x",
+    stop_recording
+)
+
+# ==========================================
 # UI
-# =============================
+# ==========================================
 root = tk.Tk()
-root.title("Recorder PRO + Save Options")
 
-frame = ttk.Frame(root, padding=20)
-frame.grid()
+root.title("PRO Screen Recorder")
 
-# FPS
-ttk.Label(frame, text="FPS:").grid(row=0, column=0)
-fps_var = tk.StringVar(value="30")
-ttk.Combobox(frame, textvariable=fps_var, values=("10", "15", "30", "60")).grid(row=0, column=1)
+root.geometry("600x400")
 
-# Devices
-devices = list_input_devices()
-device_names = [f"{i}: {name}" for i, name in devices]
+frame = ttk.Frame(
+    root,
+    padding=20
+)
 
-ttk.Label(frame, text="Audio 1:").grid(row=1, column=0)
-dev1_var = tk.StringVar()
-ttk.Combobox(frame, textvariable=dev1_var, values=device_names).grid(row=1, column=1)
+frame.pack(fill="both", expand=True)
 
-ttk.Label(frame, text="Audio 2:").grid(row=2, column=0)
-dev2_var = tk.StringVar()
-ttk.Combobox(frame, textvariable=dev2_var, values=[""] + device_names).grid(row=2, column=1)
+# ==========================================
+# AUDIO DEVICES
+# ==========================================
+ttk.Label(
+    frame,
+    text="Audio Device:"
+).grid(
+    row=0,
+    column=0,
+    sticky="w"
+)
 
-# Folder
-ttk.Button(frame, text="Choose Folder", command=choose_folder).grid(row=3, column=0)
-folder_label = ttk.Label(frame, text="No folder selected")
-folder_label.grid(row=3, column=1)
+audio_devices = get_audio_devices()
 
-# Format
-format_var = tk.StringVar(value="mp4")
-format_box = ttk.Combobox(frame, textvariable=format_var, values=("mp4", "avi", "mkv"))
-format_box.grid(row=4, column=1)
-format_box.bind("<<ComboboxSelected>>", change_format)
-ttk.Label(frame, text="Format:").grid(row=4, column=0)
+audio_var = tk.StringVar()
 
-# Buttons
-ttk.Button(frame, text="Start", command=start_recording).grid(row=5, column=0)
-ttk.Button(frame, text="Pause", command=toggle_pause).grid(row=5, column=1)
-ttk.Button(frame, text="Stop", command=stop_recording).grid(row=6, column=0, columnspan=2)
+if audio_devices:
+    audio_var.set(audio_devices[0])
 
-status_label = ttk.Label(frame, text="Idle")
-status_label.grid(row=7, column=0, columnspan=2)
+audio_box = ttk.Combobox(
+    frame,
+    textvariable=audio_var,
+    values=audio_devices,
+    width=50
+)
 
+audio_box.grid(
+    row=0,
+    column=1,
+    pady=10
+)
+
+# ==========================================
+# SAVE FOLDER
+# ==========================================
+ttk.Button(
+    frame,
+    text="Choose Folder",
+    command=choose_folder
+).grid(
+    row=1,
+    column=0,
+    pady=10
+)
+
+folder_label = ttk.Label(
+    frame,
+    text="No folder selected"
+)
+
+folder_label.grid(
+    row=1,
+    column=1
+)
+
+# ==========================================
+# START BUTTON
+# ==========================================
+start_btn = ttk.Button(
+    frame,
+    text="Start Recording",
+    command=lambda: threading.Thread(
+        target=start_recording
+    ).start()
+)
+
+start_btn.grid(
+    row=2,
+    column=0,
+    pady=20
+)
+
+# ==========================================
+# PAUSE BUTTON
+# ==========================================
+pause_btn = ttk.Button(
+    frame,
+    text="Pause / Resume",
+    command=toggle_pause
+)
+
+pause_btn.grid(
+    row=2,
+    column=1
+)
+
+# ==========================================
+# STOP BUTTON
+# ==========================================
+stop_btn = ttk.Button(
+    frame,
+    text="Stop Recording",
+    command=stop_recording
+)
+
+stop_btn.grid(
+    row=2,
+    column=2
+)
+
+# ==========================================
+# STATUS
+# ==========================================
+status_label = ttk.Label(
+    frame,
+    text="Idle"
+)
+
+status_label.grid(
+    row=3,
+    column=0,
+    columnspan=3,
+    pady=20
+)
+
+# ==========================================
+# TIMER LABEL
+# ==========================================
+timer_label = ttk.Label(
+    frame,
+    text="⏱ 00:00:00",
+    font=("Arial", 16, "bold")
+)
+
+timer_label.grid(
+    row=4,
+    column=0,
+    columnspan=3,
+    pady=10
+)
+
+# ==========================================
+# HOTKEYS INFO
+# ==========================================
+hotkeys_label = ttk.Label(
+    frame,
+    text=(
+        "HOTKEYS\n"
+        "CTRL + ALT + S = Start\n"
+        "CTRL + ALT + P = Pause / Resume\n"
+        "CTRL + ALT + X = Stop"
+    )
+)
+
+hotkeys_label.grid(
+    row=5,
+    column=0,
+    columnspan=3
+)
+
+# ==========================================
+# START TIMER LOOP
+# ==========================================
+update_timer()
+
+# ==========================================
+# MAIN LOOP
+# ==========================================
 root.mainloop()
