@@ -1,40 +1,73 @@
 import tkinter as tk
 from tkinter import filedialog
-from PIL import ImageGrab
-import ctypes
 from edit_nodes import NodeEditor
-
-try:
-    ctypes.windll.user32.SetProcessDPIAware()
-except:
-    pass
-
 
 class SnipCore:
     def __init__(self):
         self.root = tk.Tk()
-
-        self.root.attributes("-fullscreen", True)
-        self.root.attributes("-alpha", 0.25)
+        self.root.state("zoomed")
         self.root.configure(bg="black")
+
+        self.last_saved_file = None
+        self.last_saved_path = None
+        self.edit_mode = False
+        self.selected_node = None
+        self.draw_win = None
+        self.draw_mode = False
+        self.sel_start = None
+        self.sel_end = None
+        self.drag_mode = None   # "move" | "resize" | "draw"
+        self.move_offset = (0, 0)
+        self.text_size = 24
+        self.color = "red"
+        self.size = 3
+        self.draw_objects = []
+        self.selected_object = None
+        self.start_point = None
+        self.last_point = None
+        self.preview_item = None
+
+        self.tk_img_main = None
+        self.tk_img_draw = None
+
+        self.current_tool = "pen"
+        self.selected_object = None
+        self.start_point = None
+        self.last_point = None
+        self.preview_item = None
 
         self.canvas = tk.Canvas(self.root, cursor="cross")
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        # ---------------- RECT ----------------
-        self.start_x = self.start_y = 0
-        self.end_x = self.end_y = 0
-        self.rect = None
-
-        # ---------------- NODES ----------------
-        self.handles = []
-        self.selected_node = None
-
-        # ---------------- MODES ----------------
-        self.blur_mode = False
-
-        # ---------------- EDIT SYSTEM ----------------
         self.editor = NodeEditor(self)
+
+
+        self.root.tk.call('tk', 'scaling', 1.0)
+
+        # ================= IMAGE =================
+        self.image = None
+        self.tk_img = None
+
+        # ================= MODES =================
+        self.mode = "snip"   # snip | draw | edit
+
+        # ================= SELECTION =================
+        self.selecting = False
+        self.sel_start = None
+        self.sel_rect = None
+
+        # ================= NODES (8 handles) =================
+        self.handles = []
+        self.active_handle = None
+        self.handle_map = [
+            "nw", "ne", "se", "sw",
+            "n", "s", "w", "e"
+        ]
+
+        # ================= DRAW =================
+        self.draw_objects = []
+        self.current_tool = "pen"
+        self.last_point = None
 
 
         # ================= DRAW SYSTEM STATE =================
@@ -57,242 +90,657 @@ class SnipCore:
         self.active_mode = "snip"  # snip | draw
         self.preview_item = None
 
-        # ---------------- EVENTS ----------------
+
+        # ================= EVENTS =================
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
-
-        self.root.bind("<Return>", self.capture)
-        self.root.bind("<Control-b>", self.toggle_blur)
+        self.canvas.bind("<Motion>", self.on_mouse_move)
+        self.root.bind("<Control-e>", self.toggle_edit_mode)
+        self.root.bind("<Return>", self.save_selection)
+        self.root.bind("<Escape>", self.reset)
+        self.root.bind("<Up>",    lambda e: self.move_node_by(0, -5))
+        self.root.bind("<Down>",  lambda e: self.move_node_by(0, 5))
+        self.root.bind("<Left>",  lambda e: self.move_node_by(-5, 0))
+        self.root.bind("<Right>", lambda e: self.move_node_by(5, 0))
         self.root.bind("<Control-d>", self.toggle_draw_mode)
-        self.root.bind("<Control-z>", self.undo_draw)
-        self.root.bind("<Control-y>", self.redo_draw)
 
-        self.root.bind("<Up>", self.global_move)
-        self.root.bind("<Down>", self.global_move)
-        self.root.bind("<Left>", self.global_move)
-        self.root.bind("<Right>", self.global_move)
+        # mode switches
+        self.root.bind("1", lambda e: self.set_mode("snip"))
+        self.root.bind("2", lambda e: self.set_mode("draw"))
+        self.root.bind("3", lambda e: self.set_mode("edit"))
 
-        self.root.bind("w", self.global_move)
-        self.root.bind("a", self.global_move)
-        self.root.bind("s", self.global_move)
-        self.root.bind("d", self.global_move)
 
     # =========================================================
-    # BLUR MODE
+    # MODE SWITCH
     # =========================================================
-    def toggle_blur(self, event=None):
-        self.blur_mode = not self.blur_mode
-        print("Blur mode:", self.blur_mode)
-        self.update_rect()
+    def set_mode(self, mode):
+        self.mode = mode
+        print("Mode:", mode)
 
     # =========================================================
-    # MOUSE DOWN
+    # CAPTURE SCREEN
     # =========================================================
-    def on_press(self, event):
-        
-        if self.active_mode == "draw":
-            return  # ❌ stop snip selection completely
+    def capture_screen(self):
+        import ctypes
+        import time
+        from PIL import ImageGrab, ImageTk
 
-        x, y = self.pos()
+        # ===== FIX DPI =====
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except:
+            pass
 
-        # ---------------- CHECK NODE FIRST (HIGHEST PRIORITY) ----------------
-        node = self.get_handle(x, y)
+        # ===== HIDE APP FIRST =====
+        self.root.withdraw()
+        self.root.update()
 
-        if node:
-            if self.editor.enabled:
-                self.selected_node = node
-                self.editor.select_node(node)
+        # small delay to ensure clean screen
+        time.sleep(0.15)
 
-                # force visual update (yellow highlight)
-                self.draw_handles()
+        # ===== TAKE FULL SCREENSHOT =====
+        self.image = ImageGrab.grab(all_screens=True)
 
-            # ❗ IMPORTANT: STOP HERE (prevents new screenshot start)
+        # save size for later cropping
+        self.img_width, self.img_height = self.image.size
+
+        # ===== SHOW APP AGAIN =====
+        self.root.deiconify()
+
+        # force maximize after capture
+        self.root.state("zoomed")
+        self.root.lift()
+        self.root.focus_force()
+
+
+        # ===== DISPLAY IMAGE =====
+        self.tk_img = ImageTk.PhotoImage(self.image)
+
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
+
+        # reset selection
+        self.sel_start = None
+        self.sel_rect = None
+        self.selecting = True
+
+        print("Full screen captured ✔")
+
+    # =========================================================
+    # MOUSE PRESS
+    # =========================================================
+    def on_press(self, e):
+
+        # ================= EDIT MODE =================
+        if self.edit_mode:
+            self.select_node(e.x, e.y)
             return
 
-        # ---------------- ONLY IF NOT NODE → START NEW SNIP ----------------
-        self.clear_handles()
-        self.selected_node = None
-        self.editor.selected_node = None
+        # ================= NORMAL MODE =================
+        if self.mode != "snip":
+            return
 
-        self.start_x = self.end_x = x
-        self.start_y = self.end_y = y
+        result = self.hit_test(e.x, e.y)
 
-        if self.rect:
-            self.canvas.delete(self.rect)
+        if result:
+            self.drag_mode, self.active_handle = result
+            self.move_offset = (e.x, e.y)
+            return
 
-        self.rect = self.canvas.create_rectangle(
-            x, y, x, y,
-            outline="red",
-            width=2
-        )
+        self.clear_selection()
+        self.sel_start = (e.x, e.y)
+        self.sel_end = (e.x, e.y)
+        self.drag_mode = "draw"
 
     # =========================================================
     # DRAG
     # =========================================================
-    def on_drag(self, event):
+    def on_drag(self, e):
 
-        if self.active_mode == "draw":
-            return
-        
-        x, y = self.pos()
-
-        if self.editor.enabled and self.selected_node:
+        if self.edit_mode:
             return
 
-        self.end_x = x
-        self.end_y = y
+        if self.mode != "snip":
+            return
 
-        self.update_rect()
+        # ================= RESIZE ONLY FROM NODE =================
+        if self.drag_mode == "resize":
+
+            x1, y1, x2, y2 = self.get_normalized()
+            h = self.active_handle
+
+            if h == "nw":
+                x1, y1 = e.x, e.y
+            elif h == "ne":
+                x2, y1 = e.x, e.y
+            elif h == "se":
+                x2, y2 = e.x, e.y
+            elif h == "sw":
+                x1, y2 = e.x, e.y
+            elif h == "n":
+                y1 = e.y
+            elif h == "s":
+                y2 = e.y
+            elif h == "w":
+                x1 = e.x
+            elif h == "e":
+                x2 = e.x
+
+            self.sel_start = (x1, y1)
+            self.sel_end = (x2, y2)
+
+        # ================= MOVE ONLY INSIDE RECT =================
+        elif self.drag_mode == "move":
+
+            dx = e.x - self.move_offset[0]
+            dy = e.y - self.move_offset[1]
+
+            self.move_offset = (e.x, e.y)
+
+            x1, y1, x2, y2 = self.get_normalized()
+
+            x1 += dx
+            y1 += dy
+            x2 += dx
+            y2 += dy
+
+            self.sel_start = (x1, y1)
+            self.sel_end = (x2, y2)
+
+        # ================= DRAW =================
+        else:
+            self.sel_end = (e.x, e.y)
+
+        self.redraw_selection()
 
     # =========================================================
     # RELEASE
     # =========================================================
-    def on_release(self, event):
+    def on_release(self, e):
 
-        if self.active_mode == "draw":
-            return
-        
-        self.draw_handles()
+        self.drag_mode = None
+        self.active_handle = None
+        self.selecting = False
 
-    # =========================================================
-    # RECT UPDATE
-    # =========================================================
-    def update_rect(self):
-        if not self.rect:
-            return
-
-        x1, y1, x2, y2 = self.get_coords()
-
-        self.canvas.coords(self.rect, x1, y1, x2, y2)
-
-        self.draw_overlay()
-        self.draw_handles()
+        self.redraw_selection()
 
     # =========================================================
-    # OVERLAY (BLUR VISUAL)
+    # SAVE SNIP
     # =========================================================
-    def draw_overlay(self):
-        if not self.blur_mode or not self.rect:
+    def save_selection(self, event=None):
+
+        if not self.image:
+            print("No image loaded")
             return
 
-        self.canvas.create_rectangle(
-            0, 0,
-            self.canvas.winfo_width(),
-            self.canvas.winfo_height(),
-            fill="black",
-            stipple="gray25",
-            outline=""
-        )
+        img_w, img_h = self.image.size
 
-        x1, y1, x2, y2 = self.get_coords()
+        # ================= NO SELECTION → FULL SCREEN =================
+        if not self.sel_start or not self.sel_end:
+            cropped = self.image.copy()
+            print("No selection → saving full image ✔")
+        else:
+            x1, y1 = self.sel_start
+            x2, y2 = self.sel_end
 
-        self.canvas.create_rectangle(
+            left = min(x1, x2)
+            top = min(y1, y2)
+            right = max(x1, x2)
+            bottom = max(y1, y2)
+
+            # clamp to image bounds
+            left = max(0, min(left, img_w))
+            right = max(0, min(right, img_w))
+            top = max(0, min(top, img_h))
+            bottom = max(0, min(bottom, img_h))
+
+            if right - left < 2 or bottom - top < 2:
+                print("Invalid selection → saving full image ✔")
+                cropped = self.image.copy()
+            else:
+                cropped = self.image.crop((left, top, right, bottom))
+                print("Saved selected region ✔")
+
+        # ================= SAVE =================
+        path = filedialog.asksaveasfilename(defaultextension=".png")
+
+        if path:
+            try:
+                cropped.save(path)
+                self.last_saved_file = path
+            except Exception as e:
+                print("Save failed:", e)
+
+    # =========================================================
+    # RESET
+    # =========================================================
+    def reset(self, e=None):
+        self.canvas.delete("all")
+        self.root.withdraw()
+
+    # =========================================================
+    # NODE DETECTION (placeholder)
+    # =========================================================
+    def get_handle(self, x, y):
+        for h in self.handles:
+            hx, hy = h
+            if abs(hx - x) < 5 and abs(hy - y) < 5:
+                return h
+        return None
+    
+    def start_select(self, event):
+        self.sel_start = (event.x, event.y)
+
+    def update_select(self, event):
+        self.sel_end = (event.x, event.y)
+
+    def sync_rect_to_nodes(self):
+        x1, y1 = self.sel_start
+        x2, y2 = self.sel_end
+
+        self.editor.nodes["nw"] = {"x": x1, "y": y1}
+        self.editor.nodes["ne"] = {"x": x2, "y": y1}
+        self.editor.nodes["se"] = {"x": x2, "y": y2}
+        self.editor.nodes["sw"] = {"x": x1, "y": y2}
+
+    def update_selection_rect(self):
+        if self.sel_rect:
+            self.canvas.delete(self.sel_rect)
+
+        x1, y1 = self.sel_start
+        x2, y2 = self.sel_end
+
+        self.sel_rect = self.canvas.create_rectangle(
             x1, y1, x2, y2,
-            outline="yellow",
+            outline="red",
             width=2
         )
 
 
+    def clear_selection(self):
 
-    # =========================================================
-    # CLEAR HANDLES
-    # =========================================================
-    def clear_handles(self):
-        for h, _ in self.handles:
+        # remove rectangle
+        if self.sel_rect:
+            self.canvas.delete(self.sel_rect)
+            self.sel_rect = None
+
+        # remove all nodes
+        for h in self.handles:
             self.canvas.delete(h)
-        self.handles.clear()
 
-    # =========================================================
-    # HANDLE DETECTION
-    # =========================================================
-    def get_handle(self, x, y):
-        for h, name in self.handles:
-            x1, y1, x2, y2 = self.canvas.coords(h)
-            if x1 <= x <= x2 and y1 <= y <= y2:
-                return name
+        self.handles = []
+
+    def build_handles(self, x1, y1, x2, y2):
+
+        size = 5
+        color = "black"
+
+        points = [
+            (x1, y1),
+            (x2, y1),
+            (x2, y2),
+            (x1, y2),
+
+            ((x1 + x2)//2, y1),
+            ((x1 + x2)//2, y2),
+            (x1, (y1 + y2)//2),
+            (x2, (y1 + y2)//2),
+        ]
+
+        self.handles = []
+
+        for x, y in points:
+            h = self.canvas.create_rectangle(
+                x-size, y-size,
+                x+size, y+size,
+                fill="white",
+                outline="black"
+            )
+            self.handles.append(h)
+
+        def is_inside_rect(self, x, y):
+
+            if not self.sel_rect:
+                return False
+
+            coords = self.canvas.coords(self.sel_rect)
+            x1, y1, x2, y2 = coords
+
+            return x1 <= x <= x2 and y1 <= y <= y2
+        
+        def move_rectangle(self, x, y):
+
+            dx = x - self.move_offset[0]
+            dy = y - self.move_offset[1]
+
+            self.move_offset = (x, y)
+
+            # move rectangle
+            self.canvas.move(self.sel_rect, dx, dy)
+
+            # move handles
+            for h in self.handles:
+                self.canvas.move(h, dx, dy)
+
+            # update stored coords
+            coords = self.canvas.coords(self.sel_rect)
+            x1, y1, x2, y2 = coords
+
+            self.sel_start = (x1, y1)
+            self.sel_end = (x2, y2)
+
+        def resize_from_handle(self, x, y):
+
+            coords = self.canvas.coords(self.sel_rect)
+            x1, y1, x2, y2 = coords
+
+            h = self.active_handle
+
+            if h == "nw":
+                x1, y1 = x, y
+            elif h == "ne":
+                x2, y1 = x, y
+            elif h == "se":
+                x2, y2 = x, y
+            elif h == "sw":
+                x1, y2 = x, y
+
+            # update rectangle
+            self.canvas.coords(self.sel_rect, x1, y1, x2, y2)
+
+            # rebuild nodes
+            for h in self.handles:
+                self.canvas.delete(h)
+
+            self.build_handles(x1, y1, x2, y2)
+
+    def hit_test(self, x, y):
+        if not self.sel_start or not self.sel_end:
+            return None
+
+        x1, y1 = self.sel_start
+        x2, y2 = self.sel_end
+
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+
+        # ================= 1. NODES FIRST (HIGHEST PRIORITY) =================
+        points = {
+            "nw": (x1, y1),
+            "ne": (x2, y1),
+            "se": (x2, y2),
+            "sw": (x1, y2),
+            "n":  ((x1+x2)//2, y1),
+            "s":  ((x1+x2)//2, y2),
+            "w":  (x1, (y1+y2)//2),
+            "e":  (x2, (y1+y2)//2),
+        }
+
+        for name, (hx, hy) in points.items():
+            if abs(hx - x) <= 6 and abs(hy - y) <= 6:
+                return ("resize", name)
+
+        # ================= 2. INSIDE RECTANGLE =================
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            return ("move", None)
+
         return None
 
-    # =========================================================
-    # CAPTURE
-    # =========================================================
-    def capture(self, event=None):
-        x1, y1, x2, y2 = self.get_coords()
+    def redraw_selection(self):
 
-        if x1 == x2 or y1 == y2:
-            print("Invalid selection area")
+        coords = self.get_normalized()
+        if not coords:
             return
 
-        # 1) hide EVERYTHING (including blur overlay)
-        self.root.withdraw()
-        self.root.update()
+        x1, y1, x2, y2 = coords
 
-        # 2) take screenshot
-        img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
+        # ---- rectangle ----
+        if self.sel_rect:
+            self.canvas.delete(self.sel_rect)
 
-        # 3) show UI again
-        self.root.deiconify()
-        self.root.update()
-
-        self.image = img
-
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG", "*.png")]
+        self.sel_rect = self.canvas.create_rectangle(
+            x1, y1, x2, y2,
+            outline="black",
+            width=2
         )
 
-        if not file_path:
+        # ---- handles ----
+        for h in self.handles:
+            self.canvas.delete(h)
+
+        self.build_handles(x1, y1, x2, y2)
+
+    def on_mouse_move(self, e):
+
+        if self.edit_mode:
             return
 
-        img.save(file_path)
-        print("Saved:", file_path)
+        if self.mode != "snip":
+            return
 
-    # =========================================================
-    # HELPERS
-    # =========================================================
-    def get_coords(self):
-        return (
-            min(self.start_x, self.end_x),
-            min(self.start_y, self.end_y),
-            max(self.start_x, self.end_x),
-            max(self.start_y, self.end_y),
-        )
+        result = self.hit_test(e.x, e.y)
 
-    def pos(self):
+        # ================= RESIZE NODES =================
+        if result and result[0] == "resize":
+            node = result[1]
+
+            if node in ["nw", "se"]:
+                self.canvas.config(cursor="size_nw_se")
+            elif node in ["ne", "sw"]:
+                self.canvas.config(cursor="size_ne_sw")
+            elif node in ["n", "s"]:
+                self.canvas.config(cursor="sb_v_double_arrow")
+            elif node in ["e", "w"]:
+                self.canvas.config(cursor="sb_h_double_arrow")
+            return
+
+        # ================= MOVE INSIDE =================
+        if result and result[0] == "move":
+            self.canvas.config(cursor="fleur")   # Lightshot move hand
+            return
+
+        # ================= DEFAULT (LIGHTSHOT STYLE) =================
+        self.canvas.config(cursor="crosshair")
+
+    def get_normalized(self):
+        if not self.sel_start or not self.sel_end:
+            return None
+
+        x1, y1 = self.sel_start
+        x2, y2 = self.sel_end
+
         return (
-            self.canvas.winfo_pointerx() - self.canvas.winfo_rootx(),
-            self.canvas.winfo_pointery() - self.canvas.winfo_rooty(),
+            min(x1, x2),
+            min(y1, y2),
+            max(x1, x2),
+            max(y1, y2)
         )
     
+    def toggle_edit_mode(self, event=None):
+
+        self.edit_mode = not self.edit_mode
+        self.selected_node = None
+
+        print("EDIT MODE:", self.edit_mode)
+
+        # ================= TURNING OFF =================
+        if not self.edit_mode:
+            self.canvas.delete("highlight")   # ❗ remove yellow node highlight
+            self.canvas.config(cursor="crosshair")
+            return
+
+        # ================= TURNING ON =================
+        self.canvas.config(cursor="crosshair")
+
     def toggle_draw_mode(self, event=None):
-        if getattr(self, "image", None) is None:
-            print("No screenshot captured yet")
+
+        # prevent multiple windows
+        if getattr(self, "draw_win", None) and self.draw_win.winfo_exists():
+            self.draw_win.lift()
+            self.draw_win.focus_force()
             return
 
         self.draw_mode = not self.draw_mode
 
         if self.draw_mode:
+
             self.active_mode = "draw"
+
+            # ================= LOAD LAST SAVED FILE =================
+            if self.last_saved_file:
+
+                from PIL import Image
+
+                try:
+                    self.image = Image.open(self.last_saved_file)
+                    print("Loaded last saved file ✔")
+
+                except Exception as e:
+                    print("Failed loading saved file:", e)
+                    self.capture_screen()
+
+            else:
+                # first time only
+                self.capture_screen()
+
             self.open_draw_window()
+
         else:
+
             self.active_mode = "snip"
+
+            if self.draw_win:
+                self.draw_win.destroy()
+                self.draw_win = None
+
+    def select_node(self, x, y):
+
+        coords = self.get_normalized()
+        if not coords:
+            return
+
+        x1, y1, x2, y2 = coords
+
+        points = {
+            "nw": (x1, y1),
+            "ne": (x2, y1),
+            "se": (x2, y2),
+            "sw": (x1, y2),
+            "n":  ((x1+x2)//2, y1),
+            "s":  ((x1+x2)//2, y2),
+            "w":  (x1, (y1+y2)//2),
+            "e":  (x2, (y1+y2)//2),
+        }
+
+        for name, (nx, ny) in points.items():
+            if abs(nx - x) <= 8 and abs(ny - y) <= 8:
+                self.selected_node = name
+                self.highlight_nodes()
+                return
+            
+    def highlight_nodes(self):
+
+        self.redraw_selection()
+
+        # remove old highlight
+        self.canvas.delete("highlight")
+
+        if not self.selected_node:
+            return
+
+        coords = self.get_normalized()
+        if not coords:
+            return
+
+        x1, y1, x2, y2 = coords
+
+        points = {
+            "nw": (x1, y1),
+            "ne": (x2, y1),
+            "se": (x2, y2),
+            "sw": (x1, y2),
+            "n":  ((x1+x2)//2, y1),
+            "s":  ((x1+x2)//2, y2),
+            "w":  (x1, (y1+y2)//2),
+            "e":  (x2, (y1+y2)//2),
+        }
+
+        x, y = points[self.selected_node]
+
+        self.canvas.create_rectangle(
+            x-6, y-6, x+6, y+6,
+            outline="yellow",
+            width=2,
+            tags="highlight"
+        )
+
+    def move_node(self, event):
+
+        if not self.edit_mode or not self.selected_node:
+            return
+
+        dx, dy = 0, 0
+
+        if event.keysym == "Up":
+            dy = -5
+        elif event.keysym == "Down":
+            dy = 5
+        elif event.keysym == "Left":
+            dx = -5
+        elif event.keysym == "Right":
+            dx = 5
+
+        x1, y1, x2, y2 = self.get_normalized()
+
+        if self.selected_node == "nw":
+            x1 += dx; y1 += dy
+        elif self.selected_node == "ne":
+            x2 += dx; y1 += dy
+        elif self.selected_node == "se":
+            x2 += dx; y2 += dy
+        elif self.selected_node == "sw":
+            x1 += dx; y2 += dy
+        elif self.selected_node == "n":
+            y1 += dy
+        elif self.selected_node == "s":
+            y2 += dy
+        elif self.selected_node == "w":
+            x1 += dx
+        elif self.selected_node == "e":
+            x2 += dx
+
+        self.sel_start = (x1, y1)
+        self.sel_end = (x2, y2)
+
+        self.redraw_selection()
+        self.highlight_nodes()
 
     def open_draw_window(self):
         import tkinter as tk
-        from PIL import ImageTk
+        from PIL import Image, ImageTk
 
+        # ================= GET IMAGE OR CREATE EMPTY =================
         img = getattr(self, "image", None)
-        if img is None:
-            print("No image available")
-            return
 
-        self.draw_win = tk.Toplevel(self.root)
-        self.draw_win.title("Draw Mode")
+        if img is None:
+            # create empty white canvas image
+            img = Image.new("RGB", (800, 600), "white")
+            self.image = img
 
         w, h = img.size
 
-        # ================= TOOLBAR =================
-        bar = tk.Frame(self.draw_win)
+        # ================= WINDOW =================
+        self.draw_win = tk.Toplevel(self.root)
+        self.draw_win.title("Draw Mode")
+        self.draw_win.configure(bg="gray20")
+
+        # IMPORTANT: keep reference focus
+        self.draw_win.lift()
+        self.draw_win.focus_force()
+
+        # ================= TOOLBAR (FIXED LAYOUT) =================
+        bar = tk.Frame(self.draw_win, bg="gray30")
         bar.pack(side="top", fill="x")
 
         tk.Button(bar, text="Pen", command=lambda: self.set_tool("pen")).pack(side="left")
@@ -302,39 +750,60 @@ class SnipCore:
 
         tk.Button(bar, text="Undo", command=self.undo_draw).pack(side="left")
         tk.Button(bar, text="Redo", command=self.redo_draw).pack(side="left")
+        tk.Button(bar, text="A+", command=self.increase_text_size).pack(side="left")
+        tk.Button(bar, text="A-", command=self.decrease_text_size).pack(side="left")
+        self.text_size_label = tk.Label(
+            bar,
+            text=f"Text Size: {self.text_size}",
+            bg="gray30",
+            fg="white"
+        )
+        self.text_size_label.pack(side="left", padx=10)
         tk.Button(bar, text="Color", command=self.pick_color).pack(side="left")
         tk.Button(bar, text="Save", command=self.save_dialog).pack(side="left")
         tk.Button(bar, text="Open", command=self.open_image_file).pack(side="left")
-        # ================= CANVAS =================
-        self.canvas_draw = tk.Canvas(self.draw_win, width=w, height=h, bg="white")
-        self.canvas_draw.pack()
 
-        self.tk_img = ImageTk.PhotoImage(img)
-        self.canvas_draw.create_image(0, 0, anchor="nw", image=self.tk_img)
+
+
+        # ================= CANVAS FRAME =================
+        canvas_frame = tk.Frame(self.draw_win)
+        canvas_frame.pack(fill="both", expand=True)
+
+        self.canvas_draw = tk.Canvas(
+            canvas_frame,
+            width=w,
+            height=h,
+            bg="white",
+            highlightthickness=0
+        )
+        self.canvas_draw.pack(fill="both", expand=True)
+
+        # ================= IMAGE =================
+        self.tk_img_draw = ImageTk.PhotoImage(img)
+        self.canvas_draw.create_image(0, 0, anchor="nw", image=self.tk_img_draw)
 
         # ================= EVENTS =================
         self.canvas_draw.bind("<Button-1>", self.draw_start)
         self.canvas_draw.bind("<B1-Motion>", self.draw_move)
         self.canvas_draw.bind("<ButtonRelease-1>", self.draw_end)
+        # undo / redo shortcuts INSIDE draw window
+        self.draw_win.bind("<Control-z>", self.undo_draw)
+        self.draw_win.bind("<Control-y>", self.redo_draw)
 
-        # =========================================================
-        # ✅ STEP 2 — BIND KEYS ON BOTH WINDOW + CANVAS (IMPORTANT FIX)
-        # =========================================================
+        # also bind canvas directly
+        self.canvas_draw.bind("<Control-z>", self.undo_draw)
+        self.canvas_draw.bind("<Control-y>", self.redo_draw)
 
+        self.draw_win.bind("<Control-plus>", self.increase_text_size)
+        self.draw_win.bind("<Control-minus>", self.decrease_text_size)
+        self.draw_win.bind("<Return>", self.save_dialog)
         self.draw_win.bind("<KeyPress>", self.key_move)
-        self.canvas_draw.bind("<KeyPress>", self.key_move)
-
-        # force delete/backspace also directly
-        self.draw_win.bind("<Delete>", self.key_move)
-        self.draw_win.bind("<BackSpace>", self.key_move)
-        self.canvas_draw.bind("<Delete>", self.key_move)
-        self.canvas_draw.bind("<BackSpace>", self.key_move)
-
-        # ================= FORCE FOCUS =================
-        self.draw_win.lift()
-        self.draw_win.focus_force()
         self.canvas_draw.focus_set()
 
+        print("Draw window opened ✔")
+
+
+    # draw functions
     def set_tool(self, tool):
         self.current_tool = tool
 
@@ -347,18 +816,22 @@ class SnipCore:
     def pick_color(self):
         from tkinter import colorchooser
 
-        # prevent any interaction with snip canvas
         self.active_mode = "dialog"
 
-        # open color picker
+        self.draw_win.lift()
+        self.draw_win.focus_force()
+
         color = colorchooser.askcolor(title="Pick Color")[1]
 
-        # restore draw mode safely
         self.active_mode = "draw"
 
         if color:
             self.color = color
             print("Selected color:", color)
+
+        # 🔥 FORCE FOCUS BACK
+        if self.draw_win:
+            self.draw_win.after(50, lambda: self.draw_win.focus_force())
 
     def draw_start(self, event):
         x, y = event.x, event.y
@@ -380,7 +853,7 @@ class SnipCore:
             t = simpledialog.askstring("Text", "Enter text")
 
             if t:
-                obj = ("text", self.start_point, t, self.color, self.size)
+                obj = ("text", self.start_point, t, self.color, self.text_size)
                 self.add_object(obj)
                 self.render()
 
@@ -577,7 +1050,7 @@ class SnipCore:
                     p[0], p[1],
                     text=text,
                     fill=c,
-                    font=("Arial", s * 3),
+                    font=("Arial", s),
                     anchor="nw",
                     tags="draw"
                 )
@@ -631,7 +1104,6 @@ class SnipCore:
         self.history_index += 1
 
         self.render()
-
 
 
     def add_object(self, obj):
@@ -790,6 +1262,35 @@ class SnipCore:
         self.update_rect()
         self.canvas.update_idletasks()
 
+    def move_node_by(self, dx, dy):
+        if not self.edit_mode or not self.selected_node:
+            return
+
+        x1, y1, x2, y2 = self.get_normalized()
+
+        if self.selected_node == "nw":
+            x1 += dx; y1 += dy
+        elif self.selected_node == "ne":
+            x2 += dx; y1 += dy
+        elif self.selected_node == "se":
+            x2 += dx; y2 += dy
+        elif self.selected_node == "sw":
+            x1 += dx; y2 += dy
+        elif self.selected_node == "n":
+            y1 += dy
+        elif self.selected_node == "s":
+            y2 += dy
+        elif self.selected_node == "w":
+            x1 += dx
+        elif self.selected_node == "e":
+            x2 += dx
+
+        self.sel_start = (x1, y1)
+        self.sel_end = (x2, y2)
+
+        self.redraw_selection()
+        self.highlight_nodes()
+
     def key_move(self, event):
         if self.active_mode != "draw":
             return
@@ -920,84 +1421,103 @@ class SnipCore:
 
             self.handles.append((h, name))
 
-    def save_draw_result(self, path):
+    def save_draw_result(self, file_path):
         from PIL import ImageDraw, ImageFont
+        import math
+
+        if not file_path:
+            print("No file path selected")
+            return
 
         if self.image is None:
             print("No image to save")
             return
 
-        img = self.image.copy()
-        draw = ImageDraw.Draw(img)
+        try:
+            img = self.image.copy()
+            draw = ImageDraw.Draw(img)
 
-        # ---------------- DRAW ALL OBJECTS ----------------
-        for obj in self.draw_objects:
-            t = obj[0]
+            for obj in list(self.draw_objects):  # defensive copy
+                t = obj[0]
 
-            # ---------------- LINE ----------------
-            if t == "line":
-                _, a, b, color, size = obj
-                draw.line([a, b], fill=color, width=size)
+                if t == "line":
+                    _, a, b, color, size = obj
+                    draw.line([a, b], fill=color, width=size)
 
-            # ---------------- ARROW ----------------
-            elif t == "arrow":
-                _, a, b, color, size = obj
+                elif t == "arrow":
+                    _, a, b, color, size = obj
 
-                import math
+                    ax, ay = a
+                    bx, by = b
 
-                dx = b[0] - a[0]
-                dy = b[1] - a[1]
+                    dx = bx - ax
+                    dy = by - ay
 
-                length = math.hypot(dx, dy)
-                if length == 0:
-                    continue
+                    length = math.hypot(dx, dy)
+                    if length == 0:
+                        continue   # ❗ don't break whole save
 
-                # unit direction
-                ux = dx / length
-                uy = dy / length
+                    ux = dx / length
+                    uy = dy / length
 
-                # perpendicular
-                px = -uy
-                py = ux
+                    px = -uy
+                    py = ux
 
-                # 🔥 SMALL CLEAN ARROW HEAD
-                head_len = 12
-                head_width = 5
+                    line_size = max(2, int(size * 1.4))
 
-                # back point (this is KEY FIX: prevents cut look)
-                bx = b[0] - ux * head_len
-                by = b[1] - uy * head_len
+                    head_len = max(7, line_size * 2.3)
+                    head_w   = max(5, line_size * 1.5)
+                    
+                    # small extra spacing between line and head
+                    ex = bx - ux * head_len
+                    ey = by - uy * head_len
+                    shaft_width = max(size + 2, int(size * 1.8))
 
-                left = (
-                    bx + px * head_width,
-                    by + py * head_width
-                )
 
-                right = (
-                    bx - px * head_width,
-                    by - py * head_width
-                )
+                    draw.line([(ax, ay), (ex, ey)], fill=color, width=shaft_width)
 
-                # draw main line BUT STOP BEFORE TIP (IMPORTANT FIX)
-                draw.line([a, (bx, by)], fill=color, width=size)
+                    tip = (bx, by)
 
-                # draw head
-                draw.polygon([b, left, right], fill=color)
-            # ---------------- RECT ----------------
-            elif t == "rect":
-                _, a, b, color, size = obj
-                draw.rectangle([a, b], outline=color, width=size)
+                    left = (
+                        ex - ux * head_len + px * head_w,
+                        ey - uy * head_len + py * head_w
+                    )
 
-            # ---------------- TEXT ----------------
-            elif t == "text":
-                _, pos, text, color, size = obj
-                draw.text(pos, text, fill=color)
+                    right = (
+                        ex - ux * head_len - px * head_w,
+                        ey - uy * head_len - py * head_w
+                    )
 
-        # ---------------- SAVE FINAL IMAGE ----------------
-        img.save(path)
-        print("Saved edited image:", path)
+                    draw.polygon([tip, left, right], fill=color)
 
-    def save_dialog(self):
+                elif t == "rect":
+                    _, a, b, color, size = obj
+                    x0 = min(a[0], b[0])
+                    y0 = min(a[1], b[1])
+                    x1 = max(a[0], b[0])
+                    y1 = max(a[1], b[1])
+                    draw.rectangle([(x0, y0), (x1, y1)], outline=color, width=size)
+
+                elif t == "text":
+                    _, pos, text, color, size = obj
+                    try:
+                        font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", size)
+                    except:
+                        font = ImageFont.load_default()
+
+                    draw.text(pos, text, fill=color, font=font)
+
+            img.save(file_path)
+
+            self.last_saved_file = file_path
+            self.last_saved_path = file_path
+
+            print("Saved ✔", file_path)
+
+        except Exception as e:
+            print("SAVE FAILED ❌:", e)
+
+    def save_dialog(self, event=None):
         from tkinter import filedialog
 
         file_path = filedialog.asksaveasfilename(
@@ -1010,11 +1530,16 @@ class SnipCore:
         )
 
         if file_path:
+            self.last_saved_path = file_path
             self.save_draw_result(file_path)
 
     def open_image_file(self):
         from tkinter import filedialog
         from PIL import Image, ImageTk
+
+        if self.draw_win:
+            self.draw_win.lift()
+            self.draw_win.focus_force()
 
         file_path = filedialog.askopenfilename(
             filetypes=[
@@ -1023,19 +1548,20 @@ class SnipCore:
             ]
         )
 
+        # 🔥 return focus immediately
+        if self.draw_win:
+            self.draw_win.after(50, lambda: self.draw_win.focus_force())
+
         if not file_path:
             return
 
-        # load image
         img = Image.open(file_path)
         self.image = img
 
-        # reset drawing
         self.draw_objects.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
 
-        # update canvas
         w, h = img.size
         self.canvas_draw.config(width=w, height=h)
 
@@ -1045,3 +1571,24 @@ class SnipCore:
         self.canvas_draw.create_image(0, 0, anchor="nw", image=self.tk_img)
 
         print("Image loaded ✅")
+
+    def increase_text_size(self, event=None):
+        self.text_size += 2
+
+        if hasattr(self, "text_size_label"):
+            self.text_size_label.config(
+                text=f"Text Size: {self.text_size}"
+            )
+
+        print("Text Size:", self.text_size)
+
+
+    def decrease_text_size(self, event=None):
+        self.text_size = max(6, self.text_size - 2)
+
+        if hasattr(self, "text_size_label"):
+            self.text_size_label.config(
+                text=f"Text Size: {self.text_size}"
+            )
+
+        print("Text Size:", self.text_size)
