@@ -3,25 +3,57 @@ from tkinter import filedialog
 from threading import Thread
 import time
 import mss
-from PIL import Image
-from pynput import keyboard
+
+from PIL import Image, ImageDraw
+from pynput import keyboard, mouse
+
 
 class GifRecorder:
+
     def __init__(self, root):
+
         self.root = root
         self.root.title("GIF Recorder")
 
         self.recording = False
         self.paused = False
+
         self.frames = []
 
         self.start_time = 0
         self.elapsed_time = 0
 
+        # Mouse position
+        self.mouse_x = 0
+        self.mouse_y = 0
+
+        # Mouse listener
+        self.mouse_listener = mouse.Listener(
+            on_move=self.on_mouse_move
+        )
+        self.mouse_listener.start()
+
         # UI
-        tk.Button(root, text="Start (Ctrl+Alt+S)", command=self.start_recording, width=30).pack(pady=5)
-        tk.Button(root, text="Pause (Ctrl+Alt+P)", command=self.pause_resume, width=30).pack(pady=5)
-        tk.Button(root, text="Stop (Ctrl+Alt+T)", command=self.stop_recording, width=30).pack(pady=5)
+        tk.Button(
+            root,
+            text="Start (Ctrl+Alt+S)",
+            command=self.start_recording,
+            width=30
+        ).pack(pady=5)
+
+        tk.Button(
+            root,
+            text="Pause (Ctrl+Alt+P)",
+            command=self.pause_resume,
+            width=30
+        ).pack(pady=5)
+
+        tk.Button(
+            root,
+            text="Stop (Ctrl+Alt+T)",
+            command=self.stop_recording,
+            width=30
+        ).pack(pady=5)
 
         self.status = tk.Label(root, text="Status: Idle")
         self.status.pack()
@@ -31,64 +63,143 @@ class GifRecorder:
 
         self.update_timer()
 
-        # ✅ PROPER GLOBAL HOTKEYS
+        # Global hotkeys
         self.hotkeys = keyboard.GlobalHotKeys({
             '<ctrl>+<alt>+s': self.start_recording,
             '<ctrl>+<alt>+p': self.pause_resume,
             '<ctrl>+<alt>+t': self.stop_recording,
         })
+
         self.hotkeys.start()
 
-    # ⏱ Timer
+    # ----------------------------
+    # Mouse Tracking
+    # ----------------------------
+
+    def on_mouse_move(self, x, y):
+        self.mouse_x = x
+        self.mouse_y = y
+
+    # ----------------------------
+    # Timer
+    # ----------------------------
+
     def update_timer(self):
+
         if self.recording and not self.paused:
+
             self.elapsed_time = time.time() - self.start_time
-            self.timer_label.config(text=f"Time: {int(self.elapsed_time)}s")
+
+            self.timer_label.config(
+                text=f"Time: {int(self.elapsed_time)}s"
+            )
 
         self.root.after(500, self.update_timer)
 
-    # 🎥 Screen capture
+    # ----------------------------
+    # Draw Normal Black Cursor
+    # ----------------------------
+
+    def draw_cursor(self, frame):
+
+        draw = ImageDraw.Draw(frame)
+
+        x = self.mouse_x
+        y = self.mouse_y
+
+        # Black cursor arrow
+        points = [
+            (x, y),
+            (x, y + 18),
+            (x + 5, y + 14),
+            (x + 9, y + 24),
+            (x + 13, y + 22),
+            (x + 8, y + 12),
+            (x + 16, y + 12)
+        ]
+
+        draw.polygon(points, fill="black")
+
+    # ----------------------------
+    # Screen Recording
+    # ----------------------------
+
     def record_screen(self):
+
         with mss.MSS() as sct:
+
             monitor = sct.monitors[1]
 
             while self.recording:
+
                 if not self.paused:
+
                     img = sct.grab(monitor)
-                    frame = Image.frombytes("RGB", img.size, img.rgb)
+
+                    frame = Image.frombytes(
+                        "RGB",
+                        img.size,
+                        img.rgb
+                    )
+
+                    # Draw cursor
+                    self.draw_cursor(frame)
+
                     self.frames.append(frame)
 
                 time.sleep(0.1)
 
-    # ▶ Start
+    # ----------------------------
+    # Start Recording
+    # ----------------------------
+
     def start_recording(self):
+
         if self.recording:
             return
 
         self.frames = []
+
         self.recording = True
         self.paused = False
+
         self.start_time = time.time()
 
         self.status.config(text="Recording...")
+
         self.root.withdraw()
 
-        Thread(target=self.record_screen, daemon=True).start()
+        Thread(
+            target=self.record_screen,
+            daemon=True
+        ).start()
 
-    # ⏸ Pause/Resume
+    # ----------------------------
+    # Pause / Resume
+    # ----------------------------
+
     def pause_resume(self):
+
         if not self.recording:
             return
 
         self.paused = not self.paused
-        self.status.config(text="Paused" if self.paused else "Recording")
 
-    # ⏹ Stop + Save
+        self.status.config(
+            text="Paused" if self.paused else "Recording..."
+        )
+
+    # ----------------------------
+    # Stop Recording
+    # ----------------------------
+
     def stop_recording(self):
+
         if not self.recording:
             return
 
         self.recording = False
+
         self.root.deiconify()
 
         self.status.config(text="Saving GIF...")
@@ -100,6 +211,7 @@ class GifRecorder:
         )
 
         if file_path and self.frames:
+
             self.frames[0].save(
                 file_path,
                 save_all=True,
@@ -107,12 +219,19 @@ class GifRecorder:
                 duration=100,
                 loop=0
             )
+
             self.status.config(text="Saved successfully")
+
         else:
             self.status.config(text="Cancelled")
 
 
-# Run app
+# ----------------------------
+# Run App
+# ----------------------------
+
 root = tk.Tk()
+
 app = GifRecorder(root)
+
 root.mainloop()
