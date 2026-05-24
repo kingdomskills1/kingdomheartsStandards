@@ -1,0 +1,7 @@
+💡 If you want me to format like this in future
+
+You can simply say:
+
+👉 “Show wrong examples in red style using HTML/CSS”
+👉 “Highlight mistakes visually”
+👉 “Make correct vs incorrect comparison”
