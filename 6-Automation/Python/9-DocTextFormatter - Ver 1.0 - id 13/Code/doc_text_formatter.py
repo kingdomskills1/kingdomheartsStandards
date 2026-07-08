@@ -245,9 +245,48 @@ def on_highlight_select(event=None):
 
 
 # GUI Setup
+# GUI Setup
 root = tk.Tk()
 root.title("Word Text Styler")
-root.geometry("480x700")
+root.geometry("600x700")
+
+# ===== Scrollable Window =====
+main_frame = tk.Frame(root)
+main_frame.pack(fill="both", expand=True)
+
+canvas = tk.Canvas(main_frame)
+scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+
+scrollable_frame = tk.Frame(canvas)
+
+scrollable_frame.bind(
+    "<Configure>",
+    lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+)
+
+canvas_window = canvas.create_window(
+    (0, 0),
+    window=scrollable_frame,
+    anchor="nw"
+)
+
+def resize_frame(event):
+    canvas.itemconfig(canvas_window, width=event.width)
+
+canvas.bind("<Configure>", resize_frame)
+
+canvas.configure(yscrollcommand=scrollbar.set)
+
+canvas.pack(side="left", fill="both", expand=True)
+scrollbar.pack(side="right", fill="y")
+
+
+# Mouse wheel scrolling
+def _on_mousewheel(event):
+    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+scrollable_frame.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+scrollable_frame.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
 file_path = tk.StringVar()
 font_name = tk.StringVar(value="Calibri")
@@ -1235,21 +1274,22 @@ def apply_highlight_only():
 # ================= GUI WIDGETS =================
 
 # ================= File/Folder Selection =================
-tk.Label(root, text="Select Target:").pack(pady=5)
+
+tk.Label(scrollable_frame, text="Select Target:").pack(pady=5)
 
 # Radio buttons to select File or Folder
 file_or_folder = tk.StringVar(value="file")  # default to file
 
-tk.Radiobutton(root, text="File", variable=file_or_folder, value="file", command=lambda: update_subfolder_state()).pack()
-tk.Radiobutton(root, text="Folder", variable=file_or_folder, value="folder", command=lambda: update_subfolder_state()).pack()
+tk.Radiobutton(scrollable_frame, text="File", variable=file_or_folder, value="file", command=lambda: update_subfolder_state()).pack()
+tk.Radiobutton(scrollable_frame, text="Folder", variable=file_or_folder, value="folder", command=lambda: update_subfolder_state()).pack()
 
 # Entry and Browse button
-tk.Entry(root, textvariable=file_path, width=45).pack(pady=5)
-tk.Button(root, text="Browse", command=lambda: browse_target()).pack(pady=5)
+tk.Entry(scrollable_frame, textvariable=file_path, width=45).pack(pady=5)
+tk.Button(scrollable_frame, text="Browse", command=lambda: browse_target()).pack(pady=5)
 
 # Subfolders checkbox
 include_subfolders = tk.BooleanVar(value=False)
-cb_subfolders = tk.Checkbutton(root, text="Include Subfolders", variable=include_subfolders)
+cb_subfolders = tk.Checkbutton(scrollable_frame, text="Include Subfolders", variable=include_subfolders)
 cb_subfolders.pack(pady=5)
 
 # Function to enable/disable subfolders checkbox
@@ -1262,30 +1302,30 @@ def update_subfolder_state():
 update_subfolder_state()  # initialize checkbox state
 
 # ================= Font Selection =================
-tk.Label(root, text="Font Name:").pack()
+tk.Label(scrollable_frame, text="Font Name:").pack()
 common_fonts = [
     "Roboto Mono", "Arial", "Calibri", "Calibri Light", "Times New Roman", "Verdana", "Tahoma",
     "Courier New", "Georgia", "Trebuchet MS", "Impact", "Comic Sans MS"
 ]
-font_combobox = ttk.Combobox(root, textvariable=font_name, values=common_fonts)
+font_combobox = ttk.Combobox(scrollable_frame, textvariable=font_name, values=common_fonts)
 font_combobox.pack(pady=5)
 font_combobox['state'] = 'normal'
 
-tk.Label(root, text="Font Size:").pack()
+tk.Label(scrollable_frame, text="Font Size:").pack()
 common_sizes = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]
-size_combobox = ttk.Combobox(root, textvariable=font_size, values=common_sizes)
+size_combobox = ttk.Combobox(scrollable_frame, textvariable=font_size, values=common_sizes)
 size_combobox.pack(pady=5)
 size_combobox['state'] = 'normal'
 
 # ================= Formatting =================
-tk.Checkbutton(root, text="Bold", variable=bold).pack()
-tk.Checkbutton(root, text="Italic", variable=italic).pack()
-tk.Checkbutton(root, text="Underline", variable=underline).pack()
+tk.Checkbutton(scrollable_frame, text="Bold", variable=bold).pack()
+tk.Checkbutton(scrollable_frame, text="Italic", variable=italic).pack()
+tk.Checkbutton(scrollable_frame, text="Underline", variable=underline).pack()
 
 # ================= Apply Options =================
-tk.Label(root, text="Apply Options:").pack(pady=5)
+tk.Label(scrollable_frame, text="Apply Options:").pack(pady=5)
 option_menu = ttk.Combobox(
-    root,
+    scrollable_frame,
     textvariable=option_var,
     values=["All", "Headings Only", "Tables Only", "Images Only", "Text Only", "Text and Tables Only"]
 )
@@ -1293,20 +1333,20 @@ option_menu.pack(pady=5)
 option_menu.bind("<<ComboboxSelected>>", update_checkboxes)
 
 # Checkboxes
-cb_headings = tk.Checkbutton(root, text="Include Headings", variable=include_headings)
+cb_headings = tk.Checkbutton(scrollable_frame, text="Include Headings", variable=include_headings)
 cb_headings.pack(pady=2)
 
-cb_images = tk.Checkbutton(root, text="Include Images", variable=include_images)
+cb_images = tk.Checkbutton(scrollable_frame, text="Include Images", variable=include_images)
 cb_images.pack(pady=2)
 
-cb_tables = tk.Checkbutton(root, text="Include Tables", variable=include_tables)
+cb_tables = tk.Checkbutton(scrollable_frame, text="Include Tables", variable=include_tables)
 cb_tables.pack(pady=2)
 
 # ================= Color Selection =================
-tk.Button(root, text="Choose Text Color", command=choose_color).pack(pady=5)
+tk.Button(scrollable_frame, text="Choose Text Color", command=choose_color).pack(pady=5)
 
 # Preview frame
-preview_frame = tk.Frame(root)
+preview_frame = tk.Frame(scrollable_frame)
 preview_frame.pack(pady=5)
 
 tk.Label(preview_frame, text="Text Color:").grid(row=0, column=0, padx=5)
@@ -1329,15 +1369,15 @@ highlight_color_preview = tk.Label(preview_frame, width=4, height=1, bg="yellow"
 highlight_color_preview.grid(row=0, column=4, padx=5)
 
 # ================= Text Filter Section =================
-tk.Label(root, text="Text Filter:").pack(pady=5)
+tk.Label(scrollable_frame, text="Text Filter:").pack(pady=5)
 
-text_filter_entry = tk.Entry(root, textvariable=text_filter, width=40)
+text_filter_entry = tk.Entry(scrollable_frame, textvariable=text_filter, width=40)
 text_filter_entry.pack(pady=5)
 
-tk.Checkbutton(root, text="Enable Regex", variable=enable_regex).pack(pady=5)
+tk.Checkbutton(scrollable_frame, text="Enable Regex", variable=enable_regex).pack(pady=5)
 
 text_filter_option_menu = ttk.Combobox(
-    root,
+    scrollable_frame,
     textvariable=text_filter_option,
     values=["Included", "Excluded"],
     state="readonly"
@@ -1346,10 +1386,10 @@ text_filter_option_menu.pack(pady=5)
 text_filter_option_menu.current(0)  # default "Included"
 
 # ================= Apply Button =================
-tk.Button(root, text="Apply All Styles", command=apply_styles).pack(pady=10)
+tk.Button(scrollable_frame, text="Apply All Styles", command=apply_styles).pack(pady=10)
 
 # Frame to hold both buttons in one row
-text_buttons_frame = tk.Frame(root)
+text_buttons_frame = tk.Frame(scrollable_frame)
 text_buttons_frame.pack(pady=5)
 
 # Apply Text Only button
@@ -1396,4 +1436,3 @@ on_highlight_select()
 
 
 root.mainloop()
-
