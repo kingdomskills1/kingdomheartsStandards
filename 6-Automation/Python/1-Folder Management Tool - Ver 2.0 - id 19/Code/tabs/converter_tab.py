@@ -160,6 +160,19 @@ class ConverterTab:
         except Exception as e:
             print("Image error:", e)
 
+    def _build_subprocess_kwargs(self):
+        kwargs = {}
+
+        if os.name == "nt":
+            import subprocess
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            kwargs["startupinfo"] = startupinfo
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        return kwargs
+
     def convert_video(self, src):
 
         ext = self.target_format.get()
@@ -190,7 +203,8 @@ class ConverterTab:
             probe = subprocess.run(
                 probe_cmd,
                 capture_output=True,
-                text=True
+                text=True,
+                **self._build_subprocess_kwargs()
             )
 
             data = json.loads(probe.stdout)
@@ -213,7 +227,8 @@ class ConverterTab:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                universal_newlines=True
+                universal_newlines=True,
+                **self._build_subprocess_kwargs()
             )
 
             for line in process.stdout:
@@ -274,7 +289,8 @@ class ConverterTab:
             probe = subprocess.run(
                 probe_cmd,
                 capture_output=True,
-                text=True
+                text=True,
+                **self._build_subprocess_kwargs()
             )
 
             data = json.loads(probe.stdout)
@@ -296,7 +312,8 @@ class ConverterTab:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                universal_newlines=True
+                universal_newlines=True,
+                **self._build_subprocess_kwargs()
             )
 
             for line in process.stdout:
