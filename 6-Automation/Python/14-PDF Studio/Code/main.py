@@ -1,14 +1,28 @@
 import sys
+import os
+import tempfile
+
+import fitz
 
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QMainWindow,
+    QDockWidget,
     QToolBar,
     QTabWidget,
     QFileDialog,
     QMessageBox,
+    QInputDialog,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QHBoxLayout,
+    QWidget,
+    QPushButton,
+    QLabel,
 )
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtGui import QAction, QKeySequence
 
 from pdf_viewer import PDFViewer
@@ -16,6 +30,310 @@ from export_dialog import ExportDialog
 from split_dialog import SplitDialog
 from merge_dialog import MergeDialog
 from compress_dialog import CompressDialog
+from page_manager_dialog import PageManagerDialog
+from pdf_editor_dialog import PDFEditorDialog
+
+
+class BookmarkTree(QTreeWidget):
+    orderChanged = Signal()
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self.orderChanged.emit()
+
+
+class BookmarkPanel(QWidget):
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.main_window = main_window
+        self.viewer = None
+        self._refreshing = False
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Bookmarks"))
+
+        self.tree = BookmarkTree()
+        self.tree.setHeaderHidden(True)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.setDragDropMode(
+            QTreeWidget.DragDropMode.InternalMove
+        )
+        self.tree.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.tree.itemClicked.connect(self.open_bookmark)
+        self.tree.orderChanged.connect(self.apply_tree_order)
+        layout.addWidget(self.tree, 1)
+
+        buttons = QHBoxLayout()
+        self.add_button = QPushButton("Add")
+        self.add_button.clicked.connect(self.add_bookmark)
+        buttons.addWidget(self.add_button)
+
+        self.add_child_button = QPushButton("Add Sub")
+        self.add_child_button.clicked.connect(self.add_sub_bookmark)
+        buttons.addWidget(self.add_child_button)
+
+        self.edit_button = QPushButton("Edit")
+        self.edit_button.clicked.connect(self.edit_bookmark)
+        buttons.addWidget(self.edit_button)
+
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.clicked.connect(self.delete_bookmark)
+        buttons.addWidget(self.delete_button)
+        layout.addLayout(buttons)
+
+        self.set_viewer(None)
+
+    def set_viewer(self, viewer):
+        self.viewer = viewer
+        self.tree.clear()
+        enabled = viewer is not None
+        for button in (
+            self.add_button,
+            self.add_child_button,
+            self.edit_button,
+            self.delete_button,
+        ):
+            button.setEnabled(enabled)
+        if not enabled:
+            return
+
+        parents = []
+        try:
+            toc = getattr(
+                viewer,
+                "bookmark_entries",
+                viewer.document.get_toc(simple=False),
+            )
+        except Exception as error:
+            QMessageBox.warning(
+                self,
+                "Bookmarks",
+                f"Could not read PDF bookmarks:\n\n{error}",
+            )
+            return
+
+        self._refreshing = True
+        for entry in toc:
+            level, title, page_number = entry[:3]
+            item = QTreeWidgetItem(
+                [f"{title}  (Page {page_number})"]
+            )
+            item.setData(
+                0,
+                Qt.ItemDataRole.UserRole,
+                {
+                    "title": title,
+                    "page": page_number,
+                    "entry": entry,
+                },
+            )
+            while len(parents) >= level:
+                parents.pop()
+            if level == 1:
+                self.tree.addTopLevelItem(item)
+            elif parents:
+                parents[-1].addChild(item)
+            else:
+                self.tree.addTopLevelItem(item)
+            parents.append(item)
+        self.tree.expandAll()
+        self._refreshing = False
+
+    def current_page_number(self):
+        return self.viewer.current_page + 1 if self.viewer is not None else 1
+
+    def open_bookmark(self, item, _column):
+        if self.viewer is None:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data is not None:
+            destination = data.get("entry", [None, None, None])
+            destination = (
+                destination[3]
+                if len(destination) > 3 and isinstance(destination[3], dict)
+                else {}
+            )
+            self.viewer.go_to_bookmark(
+                data["page"],
+                destination.get("zoom"),
+                destination.get("to"),
+            )
+
+    def add_bookmark(self):
+        self.create_bookmark(None)
+
+    def add_sub_bookmark(self):
+        selected = self.tree.currentItem()
+        if selected is None:
+            QMessageBox.information(
+                self,
+                "Add Sub-bookmark",
+                "Select a bookmark to add a sub-bookmark under it.",
+            )
+            return
+        self.create_bookmark(selected)
+
+    def create_bookmark(self, parent_item):
+        title, accepted = QInputDialog.getText(
+            self,
+            "Add Bookmark",
+            "Bookmark name:",
+        )
+        if not accepted or not title.strip():
+            return
+        page_number, accepted = QInputDialog.getInt(
+            self,
+            "Add Bookmark",
+            "Page number:",
+            self.current_page_number(),
+            1,
+            len(self.viewer.document),
+        )
+        if not accepted:
+            return
+
+        item = QTreeWidgetItem(
+            [f"{title.strip()}  (Page {page_number})"]
+        )
+        destination = self.capture_destination(page_number)
+        item.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            {
+                "title": title.strip(),
+                "page": page_number,
+                "entry": [
+                    1,
+                    title.strip(),
+                    page_number,
+                    destination,
+                ],
+            },
+        )
+        if parent_item is None:
+            self.tree.addTopLevelItem(item)
+        else:
+            parent_item.addChild(item)
+            parent_item.setExpanded(True)
+        self.tree.setCurrentItem(item)
+        self.apply_tree_order()
+
+    def edit_bookmark(self):
+        item = self.tree.currentItem()
+        if item is None:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        title, accepted = QInputDialog.getText(
+            self,
+            "Edit Bookmark",
+            "Bookmark name:",
+            text=data["title"],
+        )
+        if not accepted or not title.strip():
+            return
+        page_number, accepted = QInputDialog.getInt(
+            self,
+            "Edit Bookmark",
+            "Page number:",
+            data["page"],
+            1,
+            len(self.viewer.document),
+        )
+        if not accepted:
+            return
+        data["title"] = title.strip()
+        data["page"] = page_number
+        data["entry"] = [
+            1,
+            data["title"],
+            page_number,
+            self.capture_destination(page_number),
+        ]
+        item.setData(0, Qt.ItemDataRole.UserRole, data)
+        item.setText(0, f"{data['title']}  (Page {page_number})")
+        self.apply_tree_order()
+
+    def capture_destination(self, page_number):
+        zoom = max(float(self.viewer.zoom), 0.01)
+        page = self.viewer.document.load_page(page_number - 1)
+        scroll_x = self.viewer.scroll_area.horizontalScrollBar().value()
+        scroll_y = self.viewer.scroll_area.verticalScrollBar().value()
+        point = fitz.Point(
+            min(max(scroll_x / zoom, 0), page.rect.width),
+            min(max(scroll_y / zoom, 0), page.rect.height),
+        )
+        return {
+            "kind": fitz.LINK_GOTO,
+            "page": page_number - 1,
+            "to": point,
+            "zoom": zoom,
+        }
+
+    def delete_bookmark(self):
+        item = self.tree.currentItem()
+        if item is None:
+            return
+        parent = item.parent()
+        if parent is None:
+            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+        else:
+            parent.takeChild(parent.indexOfChild(item))
+        self.apply_tree_order()
+
+    def apply_tree_order(self):
+        if self._refreshing or self.viewer is None:
+            return
+        entries = []
+        item_entries = []
+
+        def append_items(parent, level):
+            is_root = parent is self.tree.invisibleRootItem()
+            count = (
+                self.tree.topLevelItemCount()
+                if is_root
+                else parent.childCount()
+            )
+            for index in range(count):
+                item = (
+                    self.tree.topLevelItem(index)
+                    if is_root
+                    else parent.child(index)
+                )
+                data = item.data(0, Qt.ItemDataRole.UserRole)
+                entry = (
+                    list(data["entry"])
+                    if data["entry"]
+                    else [level, data["title"], data["page"]]
+                )
+                entry[0] = level
+                entry[1] = data["title"]
+                entry[2] = data["page"]
+                if len(entry) > 3 and isinstance(entry[3], dict):
+                    entry[3] = dict(entry[3])
+                    entry[3].pop("xref", None)
+                entries.append(entry)
+                item_entries.append((item, entry))
+                append_items(item, level + 1)
+
+        append_items(self.tree.invisibleRootItem(), 1)
+        try:
+            if not self.main_window.save_bookmarks(self.viewer, entries):
+                self.set_viewer(self.viewer)
+                return
+            for item, entry in item_entries:
+                data = item.data(0, Qt.ItemDataRole.UserRole)
+                data["entry"] = list(entry)
+                item.setData(0, Qt.ItemDataRole.UserRole, data)
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Bookmark Error",
+                f"Could not update PDF bookmarks:\n\n{error}",
+            )
+            self.set_viewer(self.viewer)
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -29,6 +347,7 @@ class MainWindow(QMainWindow):
 
         self.create_home_toolbar()
         self.create_tabs()
+        self.create_bookmark_sidebar()
 
     def create_home_toolbar(self):
         close_shortcut = QAction(self)
@@ -53,6 +372,16 @@ class MainWindow(QMainWindow):
         open_multiple_action.triggered.connect(self.open_multiple_pdfs)
 
         self.home_toolbar.addAction(open_multiple_action)
+
+        self.home_toolbar.addSeparator()
+
+        create_action = QAction("Create PDF", self)
+        create_action.triggered.connect(self.create_pdf)
+        self.home_toolbar.addAction(create_action)
+
+        edit_content_action = QAction("Edit Content", self)
+        edit_content_action.triggered.connect(self.edit_current_pdf_content)
+        self.home_toolbar.addAction(edit_content_action)
 
         self.home_toolbar.addSeparator()
 
@@ -101,8 +430,127 @@ class MainWindow(QMainWindow):
         self.tabs.setMovable(True)
 
         self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self.sync_bookmarks)
 
         self.setCentralWidget(self.tabs)
+
+    def create_bookmark_sidebar(self):
+        self.bookmark_dock = QDockWidget("Bookmarks", self)
+        self.bookmark_dock.setObjectName("BookmarksDock")
+        self.bookmark_panel = BookmarkPanel(self)
+        self.bookmark_dock.setWidget(self.bookmark_panel)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.bookmark_dock)
+
+        view_menu = self.menuBar().addMenu("View")
+        view_menu.addAction(self.bookmark_dock.toggleViewAction())
+
+    def sync_bookmarks(self, index=None):
+        if index is None:
+            index = self.tabs.currentIndex()
+        viewer = self.tabs.widget(index) if index >= 0 else None
+        self.bookmark_panel.set_viewer(viewer)
+
+    def save_bookmarks(self, viewer, entries):
+        temporary_path = None
+        output_document = None
+        same_file_viewers = []
+        saved_view_states = []
+        target_path = os.path.normcase(os.path.abspath(viewer.file_path))
+
+        try:
+            output_document = fitz.open(
+                stream=viewer.document.tobytes(),
+                filetype="pdf",
+            )
+            output_document.set_toc(entries)
+
+            target_folder = os.path.dirname(os.path.abspath(viewer.file_path))
+            file_descriptor, temporary_path = tempfile.mkstemp(
+                suffix=".pdf",
+                dir=target_folder,
+            )
+            os.close(file_descriptor)
+            os.remove(temporary_path)
+            output_document.save(
+                temporary_path,
+                garbage=4,
+                deflate=True,
+                clean=True,
+            )
+            output_document.close()
+            output_document = None
+
+            for index in range(self.tabs.count()):
+                open_viewer = self.tabs.widget(index)
+                if (
+                    isinstance(open_viewer, PDFViewer)
+                    and os.path.normcase(os.path.abspath(open_viewer.file_path))
+                    == target_path
+                ):
+                    same_file_viewers.append(open_viewer)
+                    saved_view_states.append(
+                        {
+                            "page": open_viewer.current_page,
+                            "zoom": open_viewer.zoom,
+                            "fit": open_viewer.fit_page_active,
+                            "two_page": open_viewer.two_page_view,
+                            "scroll_x": (
+                                open_viewer.scroll_area.horizontalScrollBar().value()
+                            ),
+                            "scroll_y": (
+                                open_viewer.scroll_area.verticalScrollBar().value()
+                            ),
+                        }
+                    )
+
+            for open_viewer in same_file_viewers:
+                open_viewer.close_document()
+
+            os.replace(temporary_path, viewer.file_path)
+            temporary_path = None
+
+            for open_viewer, state in zip(
+                same_file_viewers,
+                saved_view_states,
+            ):
+                open_viewer.document = fitz.open(open_viewer.file_path)
+                open_viewer.current_page = min(
+                    state["page"],
+                    len(open_viewer.document) - 1,
+                )
+                open_viewer.page_number.setMaximum(
+                    len(open_viewer.document)
+                )
+                open_viewer.zoom = state["zoom"]
+                open_viewer.fit_page_active = state["fit"]
+                open_viewer.two_page_view = state["two_page"]
+                open_viewer.render_page()
+                open_viewer.scroll_area.horizontalScrollBar().setValue(
+                    state["scroll_x"]
+                )
+                open_viewer.scroll_area.verticalScrollBar().setValue(
+                    state["scroll_y"]
+                )
+                open_viewer.bookmark_entries = (
+                    open_viewer.document.get_toc(simple=False)
+                )
+
+            return True
+        except Exception as error:
+            if output_document is not None:
+                output_document.close()
+            for open_viewer in same_file_viewers:
+                if open_viewer.document is None:
+                    open_viewer.document = fitz.open(open_viewer.file_path)
+            QMessageBox.critical(
+                self,
+                "Bookmark Save Error",
+                f"Could not automatically save bookmarks to the PDF:\n\n{error}",
+            )
+            return False
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.remove(temporary_path)
 
     def open_pdf(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -125,6 +573,61 @@ class MainWindow(QMainWindow):
 
         for file_path in file_paths:
             self.add_pdf_tab(file_path)
+
+    def create_pdf(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Create PDF",
+            "",
+            "PDF Files (*.pdf)",
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".pdf"):
+            file_path += ".pdf"
+
+        dialog = PDFEditorDialog(
+            initial_output_path=file_path,
+            parent=self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.output_path:
+            self.add_pdf_tab(dialog.output_path)
+
+    def edit_current_pdf_content(self):
+        index = self.tabs.currentIndex()
+        if index < 0:
+            QMessageBox.warning(
+                self,
+                "Edit Content",
+                "Please open a PDF first.",
+            )
+            return
+
+        viewer = self.tabs.widget(index)
+        dialog = PDFEditorDialog(viewer.file_path, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.output_path:
+            self.add_pdf_tab(dialog.output_path)
+
+    def update_current_pdf(self):
+        index = self.tabs.currentIndex()
+        if index < 0:
+            QMessageBox.warning(
+                self,
+                "Update PDF",
+                "Please open a PDF first.",
+            )
+            return
+
+        viewer = self.tabs.widget(index)
+        dialog = PageManagerDialog(viewer.file_path, self)
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted and dialog.output_file:
+                self.add_pdf_tab(dialog.output_file)
+        finally:
+            if dialog.document:
+                dialog.document.close()
+                dialog.document = None
 
     def add_pdf_tab(self, file_path):
         try:
