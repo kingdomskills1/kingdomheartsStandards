@@ -26,6 +26,9 @@ class ImageViewer(
     def __init__(self, root):
         self.root = root
         self.root.title("Image Viewer")
+        self.root.iconbitmap(
+            str(Path(__file__).with_name("Image Studio Icon.ico"))
+        )
         self.root.geometry("1100x750")
         self.root.minsize(500, 350)
         self.root.configure(bg="#202020")
