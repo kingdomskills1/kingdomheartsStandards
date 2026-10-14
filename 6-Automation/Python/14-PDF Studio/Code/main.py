@@ -1,5 +1,7 @@
 import sys
 import os
+import json
+import subprocess
 import tempfile
 
 import fitz
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from pdf_viewer import PDFViewer
 from export_dialog import ExportDialog
@@ -343,12 +346,21 @@ class MainWindow(QMainWindow):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocus()
 
-        self.setWindowTitle("PDF Viewer")
+        self.setWindowTitle("PDF Studio")
         self.resize(1200, 800)
 
         self.create_home_toolbar()
         self.create_tabs()
         self.create_bookmark_sidebar()
+
+    def open_pdf_paths(self, file_paths):
+        for file_path in file_paths:
+            if os.path.splitext(file_path)[1].lower() == ".pdf":
+                self.add_pdf_tab(os.path.abspath(file_path))
+
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def create_home_toolbar(self):
         close_shortcut = QAction(self)
@@ -861,13 +873,174 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setApplicationName("PDF Studio")
 
     app.setStyle("Fusion")
 
+    server = None
+    if os.name == "nt":
+        server_name = "PDFStudioSingleInstance"
+        if forward_to_running_instance(server_name, sys.argv[1:]):
+            return
+
+        server = QLocalServer()
+        if not server.listen(server_name):
+            if forward_to_running_instance(server_name, sys.argv[1:]):
+                return
+
+            QLocalServer.removeServer(server_name)
+            if not server.listen(server_name):
+                QMessageBox.critical(
+                    None,
+                    "PDF Studio",
+                    "Could not start the single-instance service:\n\n"
+                    f"{server.errorString()}",
+                )
+                return
+
     window = MainWindow()
+    if server is not None:
+        server.newConnection.connect(
+            lambda: open_instance_requests(server, window)
+        )
+    window.open_pdf_paths(sys.argv[1:])
     window.show()
 
+    if os.name == "nt":
+        try:
+            register_windows_pdf_handler()
+        except OSError as error:
+            QMessageBox.warning(
+                window,
+                "Windows Default Apps",
+                f"PDF Studio could not register as a PDF app:\n\n{error}",
+            )
+
     sys.exit(app.exec())
+
+
+def forward_to_running_instance(server_name, file_paths):
+    socket = QLocalSocket()
+    socket.connectToServer(server_name)
+    if not socket.waitForConnected(500):
+        return False
+
+    payload = json.dumps(file_paths).encode("utf-8") + b"\n"
+    if socket.write(payload) != len(payload):
+        socket.abort()
+        return False
+    if (
+        socket.bytesToWrite()
+        and not socket.waitForBytesWritten(1000)
+        and socket.bytesToWrite()
+    ):
+        socket.abort()
+        return False
+    socket.flush()
+    socket.disconnectFromServer()
+    return True
+
+
+def open_instance_requests(server, window):
+    while server.hasPendingConnections():
+        socket = server.nextPendingConnection()
+        buffer = bytearray()
+
+        def read_request(socket=socket, buffer=buffer):
+            buffer.extend(bytes(socket.readAll()))
+            while b"\n" in buffer:
+                message, _, remaining = buffer.partition(b"\n")
+                buffer[:] = remaining
+                try:
+                    file_paths = json.loads(message)
+                    if not isinstance(file_paths, list) or not all(
+                        isinstance(path, str) for path in file_paths
+                    ):
+                        raise ValueError("Expected a list of file paths.")
+                except (json.JSONDecodeError, ValueError) as error:
+                    QMessageBox.warning(
+                        window,
+                        "PDF Studio",
+                        f"Could not process files from another launch:\n\n{error}",
+                    )
+                    continue
+
+                window.open_pdf_paths(file_paths)
+
+        socket.readyRead.connect(read_request)
+        socket.disconnected.connect(socket.deleteLater)
+        read_request()
+
+
+def register_windows_pdf_handler():
+    if os.name != "nt":
+        return
+
+    import winreg
+
+    app_name = "PDF Studio"
+    prog_id = "PDFStudio.Document"
+    capabilities_path = "Software\\PDF Studio\\Capabilities"
+    classes_path = "Software\\Classes"
+
+    if getattr(sys, "frozen", False):
+        executable = sys.executable
+        command = subprocess.list2cmdline([executable]) + ' "%1"'
+    else:
+        executable = os.path.join(
+            os.path.dirname(sys.executable),
+            "pythonw.exe",
+        )
+        if not os.path.isfile(executable):
+            executable = sys.executable
+        command = subprocess.list2cmdline(
+            [executable, os.path.abspath(__file__)]
+        ) + ' "%1"'
+
+    def set_registry_value(path, name, value):
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            path,
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+
+    set_registry_value(
+        f"{classes_path}\\{prog_id}",
+        None,
+        "PDF Studio PDF Document",
+    )
+    set_registry_value(
+        f"{classes_path}\\{prog_id}\\shell\\open\\command",
+        None,
+        command,
+    )
+    set_registry_value(
+        f"{classes_path}\\.pdf\\OpenWithProgids",
+        prog_id,
+        "",
+    )
+    set_registry_value(
+        f"{capabilities_path}\\FileAssociations",
+        ".pdf",
+        prog_id,
+    )
+    set_registry_value(
+        capabilities_path,
+        "ApplicationName",
+        app_name,
+    )
+    set_registry_value(
+        capabilities_path,
+        "ApplicationDescription",
+        "View and edit PDF files with PDF Studio.",
+    )
+    set_registry_value(
+        "Software\\RegisteredApplications",
+        app_name,
+        capabilities_path,
+    )
 
 
 if __name__ == "__main__":

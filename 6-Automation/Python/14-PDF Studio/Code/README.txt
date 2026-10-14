@@ -37,6 +37,15 @@ Run the application
 3. Start the app:
    python main.py
 
+Set PDF Studio as the default PDF app on Windows
+- Start PDF Studio once. It registers itself as an available PDF app for the
+  current Windows user; it does not change the existing default.
+- In Windows Settings, go to Apps > Default apps, find .pdf, and choose PDF
+  Studio. PDFs opened through Windows will then launch in PDF Studio.
+- PDF Studio also opens PDF paths passed on the command line, including paths
+  containing spaces. If PDF Studio is already running, newly opened PDFs are
+  sent to that instance and opened in separate tabs.
+
 Create PDF
 - Use Create PDF to make a new blank A4 PDF.
 - The visual editor opens after selecting a file name. Add pages and content
