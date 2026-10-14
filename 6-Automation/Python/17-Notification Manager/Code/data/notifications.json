@@ -1,0 +1,44 @@
+[
+    {
+        "id": "33a9c6ac-890d-4db2-9481-63c69ea20e35",
+        "type": "date_time",
+        "title": "meal time",
+        "message": "eat now",
+        "enabled": false,
+        "sound_enabled": true,
+        "sound_file": "D:/Main/1-Desktop/others/tones/Chimes.wav",
+        "settings": {
+            "date": "2026-10-06",
+            "time": "18:11:30",
+            "repeat_seconds": 15
+        }
+    },
+    {
+        "id": "35e26319-071a-48e1-9a23-83a361f51ef4",
+        "type": "battery",
+        "title": "unplug",
+        "message": "unplug message",
+        "enabled": true,
+        "sound_enabled": true,
+        "sound_file": "D:/Main/1-Desktop/others/tones/Chords.wav",
+        "settings": {
+            "mode": "unplug",
+            "threshold": 95,
+            "repeat_seconds": 5
+        }
+    },
+    {
+        "id": "be61da4f-1f2c-4b7d-b1dc-db6fb9bc42bc",
+        "type": "battery",
+        "title": "plug",
+        "message": "plug message",
+        "enabled": true,
+        "sound_enabled": true,
+        "sound_file": "D:/Main/1-Desktop/others/tones/Chords.wav",
+        "settings": {
+            "mode": "plug_in",
+            "threshold": 35,
+            "repeat_seconds": 5
+        }
+    }
+]
