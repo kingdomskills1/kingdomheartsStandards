@@ -1,4 +1,6 @@
+import sys
 import tkinter as tk
+from pathlib import Path
 
 from viewer_collage import ViewerCollageMixin
 from viewer_crop import ViewerCropMixin
@@ -28,12 +30,23 @@ class ImageViewer(
         self.root.minsize(500, 350)
         self.root.configure(bg="#202020")
 
+        self.recent_files = self._load_recent_files()
         self.image_path = None
         self.folder_images = []
         self.image_index = 0
         self.original_image = None
         self.display_image = None
         self.photo = None
+        self.animation_frames = []
+        self.animation_durations = []
+        self.animation_index = 0
+        self.animation_after_id = None
+        self.animation_next_frame_at = None
+        self.animation_generation = 0
+        self.animation_frame_queue = None
+        self.animation_load_after_id = None
+        self.animation_load_cancelled = None
+        self.animation_load_complete = True
         self.zoom = 1.0
         self.rotation = 0
         self.fit_mode = True
@@ -90,4 +103,6 @@ class ImageViewer(
 if __name__ == "__main__":
     root = tk.Tk()
     app = ImageViewer(root)
+    if len(sys.argv) > 1:
+        root.after(0, app.load_image, str(Path(sys.argv[1])))
     root.mainloop()

@@ -1,7 +1,112 @@
 import tkinter as tk
+from pathlib import Path
+from tkinter import messagebox
+
+from recent_files import add_recent_file, load_recent_files
+from windows_registration import (
+    open_default_apps_settings,
+    register_default_app,
+)
 
 
 class ViewerUIMixin:
+
+    def _load_recent_files(self):
+        try:
+            return load_recent_files()
+        except (OSError, ValueError) as error:
+            messagebox.showerror(
+                "Unable to Load Recent Files",
+                f"Could not load the recent files list:\n\n{error}",
+            )
+            return []
+
+    def _record_recent_file(self, filename):
+        try:
+            self.recent_files = add_recent_file(
+                self.recent_files,
+                filename,
+            )
+        except OSError as error:
+            messagebox.showerror(
+                "Unable to Save Recent Files",
+                f"The image opened, but the recent files list "
+                f"could not be saved:\n\n{error}",
+            )
+        self._refresh_recent_files_menu()
+
+    def _open_recent_file(self, filename):
+        self.load_image(filename)
+
+    def _show_recent_files_menu(self, event=None):
+        if self.recent_menu_close_after_id is not None:
+            self.root.after_cancel(self.recent_menu_close_after_id)
+            self.recent_menu_close_after_id = None
+
+        if not self.recent_files_menu.winfo_ismapped():
+            self.recent_files_menu.post(
+                self.recent_files_button.winfo_rootx(),
+                self.recent_files_button.winfo_rooty()
+                + self.recent_files_button.winfo_height(),
+            )
+
+    def _schedule_recent_files_menu_close(self, event=None):
+        if self.recent_menu_close_after_id is None:
+            self.recent_menu_close_after_id = self.root.after(
+                250,
+                self._close_recent_files_menu,
+            )
+
+    def _close_recent_files_menu(self):
+        self.recent_menu_close_after_id = None
+        self.recent_files_menu.unpost()
+
+    def _refresh_recent_files_menu(self):
+        self.recent_files_menu.delete(0, tk.END)
+        if not self.recent_files:
+            self.recent_files_menu.add_command(
+                label="No recent files",
+                state=tk.DISABLED,
+            )
+            return
+
+        for filename in self.recent_files:
+            path = Path(filename)
+            self.recent_files_menu.add_command(
+                label=f"{path.name} ({path.parent})",
+                command=lambda selected=filename: self._open_recent_file(
+                    selected
+                ),
+            )
+
+    def register_windows_default_app(self):
+        try:
+            register_default_app(
+                Path(__file__).with_name("main.py"),
+                self.SUPPORTED_FORMATS,
+            )
+        except (OSError, RuntimeError) as error:
+            messagebox.showerror(
+                "Windows Registration Failed",
+                f"Could not register Image Viewer with Windows:\n\n{error}",
+            )
+            return
+
+        try:
+            open_default_apps_settings()
+        except OSError as error:
+            messagebox.showerror(
+                "Could Not Open Default Apps",
+                "Image Viewer is registered with Windows, but Default apps "
+                f"settings could not be opened:\n\n{error}",
+            )
+            return
+
+        messagebox.showinfo(
+            "Choose Image Viewer",
+            "Image Viewer is now listed in Windows Default apps.\n\n"
+            "Choose it for each image file type you want to open with this app.",
+        )
 
     def _build_interface(self):
         # Toolbar
@@ -11,6 +116,42 @@ class ViewerUIMixin:
         self.toolbar_controls.pack(side=tk.TOP, fill=tk.X)
         self.collage_toolbar = tk.Frame(self.toolbar, bg="#303030")
         self.collage_toolbar.pack(side=tk.TOP, fill=tk.X)
+        self.recent_files_menu = tk.Menu(
+            self.root,
+            tearoff=False,
+            bg="#454545",
+            fg="white",
+            activebackground="#606060",
+            activeforeground="white",
+        )
+        self.recent_files_button = tk.Menubutton(
+            self.toolbar_controls,
+            text="Recent Files",
+            menu=self.recent_files_menu,
+            bg="#454545",
+            fg="white",
+            activebackground="#606060",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=8,
+            pady=5,
+            cursor="hand2",
+        )
+        self.recent_files_button.pack(side=tk.LEFT, padx=2)
+        self.recent_menu_close_after_id = None
+        self.recent_files_button.bind(
+            "<Enter>", self._show_recent_files_menu
+        )
+        self.recent_files_button.bind(
+            "<Leave>", self._schedule_recent_files_menu_close
+        )
+        self.recent_files_menu.bind(
+            "<Enter>", self._show_recent_files_menu
+        )
+        self.recent_files_menu.bind(
+            "<Leave>", self._schedule_recent_files_menu_close
+        )
+        self._refresh_recent_files_menu()
 
         buttons = [
             ("Open", self.open_image),
@@ -20,6 +161,7 @@ class ViewerUIMixin:
             ("Create Collage", self.create_collage),
             ("Add Images", self.add_collage_images),
             ("Save Collage", self.save_collage),
+            ("Register with Windows", self.register_windows_default_app),
             ("Previous", self.previous_image),
             ("Next", self.next_image),
             ("Zoom +", lambda: self.change_zoom(1.2)),
@@ -42,7 +184,12 @@ class ViewerUIMixin:
         for label, command in buttons:
             button_parent = (
                 self.collage_toolbar
-                if label in {"Create Collage", "Add Images", "Save Collage"}
+                if label in {
+                    "Create Collage",
+                    "Add Images",
+                    "Save Collage",
+                    "Register with Windows",
+                }
                 else self.toolbar_controls
             )
             button = tk.Button(
@@ -67,6 +214,8 @@ class ViewerUIMixin:
             button.pack(side=tk.LEFT, padx=2)
             if label in {"Create Collage", "Add Images", "Save Collage"}:
                 self.collage_buttons.append(button)
+            elif label == "Register with Windows":
+                continue
             elif label in {"Open", "Move / Resize", "Full Screen Size", "Save Image"}:
                 self.image_layout_buttons.append(button)
             else:
@@ -126,6 +275,8 @@ class ViewerUIMixin:
         self.root.bind("<Control-y>", lambda event: self.redo())
         self.root.bind("<Control-Z>", lambda event: self.redo())
         self.root.bind("<Escape>", lambda event: self.handle_escape())
+        self.root.bind("<KeyPress-f>", lambda event: self.toggle_fullscreen())
+        self.root.bind("<KeyPress-F>", lambda event: self.toggle_fullscreen())
         self.root.bind("<F11>", lambda event: self.toggle_fullscreen())
         self.root.bind("<Control-w>", lambda event: self.close_image())
 
@@ -164,6 +315,7 @@ class ViewerUIMixin:
             self.exit_fullscreen()
 
     def close_image(self):
+        self._clear_animation()
         self.image_path = None
         self.original_image = None
         self.image_layout_mode = False

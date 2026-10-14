@@ -79,6 +79,7 @@ class ViewerCollageMixin:
             return
 
         if replace:
+            self._clear_animation()
             self.collage_items = []
             self.collage_selected_index = None
             self.collage_canvas_width = max(1, self.canvas.winfo_width())

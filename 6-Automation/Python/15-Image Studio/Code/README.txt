@@ -28,6 +28,9 @@ Core Features
 -------------
 - Open one image from disk
 - Browse through images in the same folder
+- Reopen the 10 most recently opened files
+- Load and play animated GIF files without blocking the window
+- Register as a Windows Default apps option for supported image formats
 - Zoom in and out
 - Fit image to canvas or actual size
 - Rotate left or right
@@ -48,6 +51,8 @@ The main window has:
 Keyboard and Mouse Controls
 ---------------------------
 - Ctrl+O: open image
+- Hover over Recent Files to open a recent image
+- F: toggle fullscreen
 - Left Arrow: previous image
 - Right Arrow: next image
 - Mouse wheel: zoom in/out
@@ -65,6 +70,9 @@ viewer_ui.py
 viewer_image.py
   Opens files, loads images into memory, loads neighboring folder images, and renders the current image.
 
+recent_files.py
+  Persists the ten most recently opened image paths for the current user.
+
 viewer_crop.py
   Handles crop selection, resizing crop bounds, and applying crop changes.
 
@@ -76,6 +84,9 @@ viewer_layout.py
 
 viewer_collage.py
   Creates multi-image collages, lays out tiles, and saves combined results.
+
+windows_registration.py
+  Registers the app per-user as a Windows Default apps option.
 
 Notes
 -----
@@ -90,6 +101,16 @@ Typical Usage
 3. Use toolbar actions to zoom, rotate, crop, or fullscreen.
 4. Browse the folder using Previous and Next.
 5. Save any modified image or collage when done.
+6. Choose Register with Windows, then select Image Viewer for the desired file
+   types in Windows Settings > Apps > Default apps.
+
+Windows Default App Registration
+-------------------------------
+Registration is per-user and does not change existing Windows defaults. The
+application must remain in its current location and use the same Python
+installation after registration. If either changes, choose Register with
+Windows again. Windows Settings requires the user to select Image Viewer for
+each desired file type.
 
 Dependencies
 ------------

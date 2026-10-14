@@ -10,6 +10,7 @@ class ViewerCropMixin:
         if self.original_image is None:
             return
 
+        self._stop_animation()
         if self.image_layout_mode:
             self.image_layout_mode = False
             self.image_layout_drag_action = None
@@ -260,6 +261,7 @@ class ViewerCropMixin:
             button.configure(state=tk.NORMAL)
         self.canvas.configure(cursor="")
         self._update_status()
+        self._schedule_animation_frame()
 
     def apply_crop(self):
         if (
@@ -298,6 +300,7 @@ class ViewerCropMixin:
         ))
 
         self.crop_mode = False
+        self._clear_animation()
         self.crop_drag_action = None
         self.crop_initial_coords = None
         self.canvas.delete(self.crop_rect_id)

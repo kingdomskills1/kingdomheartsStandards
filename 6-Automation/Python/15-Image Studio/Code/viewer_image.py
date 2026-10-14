@@ -1,3 +1,6 @@
+import queue
+import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -22,15 +25,33 @@ class ViewerImageMixin:
     def load_image(self, filename):
         try:
             path = Path(filename)
+            animation_frames = []
+            animation_durations = []
+            animation_frame_count = 0
 
             with Image.open(path) as image:
-                # Apply EXIF orientation and load a safe copy.
-                image = ImageOps.exif_transpose(image)
-                image.seek(0)
-                loaded_image = image.convert("RGBA").copy()
+                if image.format == "GIF" and image.n_frames > 1:
+                    image.seek(0)
+                    loaded_image = (
+                        ImageOps.exif_transpose(image).convert("RGBA").copy()
+                    )
+                    animation_frames.append(loaded_image)
+                    animation_durations.append(
+                        self._animation_frame_duration(image)
+                    )
+                    animation_frame_count = image.n_frames
+                else:
+                    image = ImageOps.exif_transpose(image)
+                    image.seek(0)
+                    loaded_image = image.convert("RGBA").copy()
 
+            self._clear_animation()
             self.image_path = path
             self.original_image = loaded_image
+            self.animation_frames = animation_frames
+            self.animation_durations = animation_durations
+            self.animation_index = 0
+            self.animation_load_complete = animation_frame_count < 2
             self.image_layout_mode = False
             self.image_layout_drag_action = None
             self.collage_mode = False
@@ -61,12 +82,200 @@ class ViewerImageMixin:
 
             self._load_folder_images()
             self.display_current_image()
+            if animation_frame_count > 1:
+                self._start_animation_loading(path, animation_frame_count)
+            self._record_recent_file(path)
 
         except Exception as error:
             messagebox.showerror(
                 "Unable to Open Image",
                 f"Could not open this image:\n\n{error}"
             )
+
+    @staticmethod
+    def _animation_frame_duration(image):
+        duration = image.info.get("duration", 100)
+        return max(20, int(100 if duration is None else duration))
+
+    def _start_animation_loading(self, path, frame_count):
+        frame_queue = queue.Queue(maxsize=4)
+        cancelled = threading.Event()
+        self.animation_frame_queue = frame_queue
+        self.animation_load_cancelled = cancelled
+        generation = self.animation_generation
+
+        worker = threading.Thread(
+            target=self._decode_animation_frames,
+            args=(path, frame_count, frame_queue, cancelled),
+            daemon=True,
+        )
+        worker.start()
+        self.animation_load_after_id = self.root.after(
+            15,
+            self._poll_animation_frames,
+            generation,
+        )
+
+    def _decode_animation_frames(
+        self,
+        path,
+        frame_count,
+        frame_queue,
+        cancelled,
+    ):
+        try:
+            with Image.open(path) as image:
+                for frame_index in range(1, frame_count):
+                    if cancelled.is_set():
+                        return
+
+                    image.seek(frame_index)
+                    frame = (
+                        ImageOps.exif_transpose(image).convert("RGBA").copy()
+                    )
+                    message = (
+                        "frame",
+                        frame,
+                        self._animation_frame_duration(image),
+                    )
+                    while not cancelled.is_set():
+                        try:
+                            frame_queue.put(message, timeout=0.1)
+                            break
+                        except queue.Full:
+                            continue
+                    else:
+                        return
+        except Exception as error:
+            self._put_animation_load_message(
+                frame_queue,
+                cancelled,
+                ("error", error, None),
+            )
+            return
+
+        self._put_animation_load_message(
+            frame_queue,
+            cancelled,
+            ("done", None, None),
+        )
+
+    @staticmethod
+    def _put_animation_load_message(frame_queue, cancelled, message):
+        while not cancelled.is_set():
+            try:
+                frame_queue.put(message, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def _poll_animation_frames(self, generation):
+        self.animation_load_after_id = None
+        if generation != self.animation_generation:
+            return
+
+        while True:
+            try:
+                message_type, value, duration = (
+                    self.animation_frame_queue.get_nowait()
+                )
+            except queue.Empty:
+                break
+
+            if message_type == "frame":
+                self.animation_frames.append(value)
+                self.animation_durations.append(duration)
+                if len(self.animation_frames) > 1:
+                    self._schedule_animation_frame()
+            elif message_type == "done":
+                self.animation_load_complete = True
+                self.animation_load_cancelled = None
+            elif message_type == "error":
+                self.animation_load_complete = True
+                self.animation_load_cancelled = None
+                messagebox.showerror(
+                    "GIF Playback Incomplete",
+                    f"Could not load all GIF frames:\n\n{value}",
+                )
+
+        if not self.animation_load_complete:
+            self.animation_load_after_id = self.root.after(
+                15,
+                self._poll_animation_frames,
+                generation,
+            )
+
+    def _stop_animation(self):
+        if self.animation_after_id is not None:
+            self.root.after_cancel(self.animation_after_id)
+            self.animation_after_id = None
+        self.animation_next_frame_at = None
+
+    def _clear_animation(self):
+        self._stop_animation()
+        self.animation_generation += 1
+        if self.animation_load_after_id is not None:
+            self.root.after_cancel(self.animation_load_after_id)
+            self.animation_load_after_id = None
+        if self.animation_load_cancelled is not None:
+            self.animation_load_cancelled.set()
+            self.animation_load_cancelled = None
+        self.animation_frame_queue = None
+        self.animation_frames = []
+        self.animation_durations = []
+        self.animation_index = 0
+        self.animation_load_complete = True
+
+    def _schedule_animation_frame(self):
+        if (
+            len(self.animation_frames) > 1
+            and not self.crop_mode
+            and self.animation_after_id is None
+        ):
+            if self.animation_next_frame_at is None:
+                self.animation_next_frame_at = (
+                    time.monotonic()
+                    + self.animation_durations[self.animation_index] / 1000
+                )
+            delay = max(
+                1,
+                round(
+                    (self.animation_next_frame_at - time.monotonic()) * 1000
+                )
+            )
+            self.animation_after_id = self.root.after(
+                delay, self._show_next_animation_frame
+            )
+
+    def _show_next_animation_frame(self):
+        self.animation_after_id = None
+        if len(self.animation_frames) < 2 or self.crop_mode:
+            return
+
+        if (
+            not self.animation_load_complete
+            and self.animation_index + 1 >= len(self.animation_frames)
+        ):
+            self.animation_next_frame_at = None
+            return
+
+        now = time.monotonic()
+        self.animation_index = (
+            self.animation_index + 1
+        ) % len(self.animation_frames)
+        self.animation_next_frame_at += (
+            self.animation_durations[self.animation_index] / 1000
+        )
+        while self.animation_next_frame_at <= now:
+            self.animation_index = (
+                self.animation_index + 1
+            ) % len(self.animation_frames)
+            self.animation_next_frame_at += (
+                self.animation_durations[self.animation_index] / 1000
+            )
+        self.original_image = self.animation_frames[self.animation_index]
+        self.display_current_image()
+        self._schedule_animation_frame()
 
     def _load_folder_images(self):
         folder = self.image_path.parent
