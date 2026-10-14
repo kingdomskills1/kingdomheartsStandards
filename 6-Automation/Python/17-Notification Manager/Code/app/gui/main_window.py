@@ -1,4 +1,5 @@
 from PySide6.QtCore import Qt, Slot
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.gui.notification_dialog import NotificationDialog
+from app.gui.icon import get_icon_path
 
 
 class MainWindow(QMainWindow):
@@ -24,6 +26,10 @@ class MainWindow(QMainWindow):
 
         self.application = application
         self.notification_popup = None
+
+        icon_path = get_icon_path()
+        if icon_path is not None:
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         self.setWindowTitle("Notification Manager")
         self.resize(1000, 600)

@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
 )
 
+from app.gui.icon import get_icon_path
+
 
 class TrayIcon(QObject):
     """
@@ -18,16 +20,16 @@ class TrayIcon(QObject):
         self.application = application
         self.main_window = main_window
 
-        self.tray = QSystemTrayIcon()
+        icon_path = get_icon_path()
+        if icon_path is not None:
+            icon = QIcon(str(icon_path))
+        else:
+            # Fallback to a generic Qt icon if the custom icon is missing.
+            icon = self.main_window.style().standardIcon(
+                QStyle.StandardPixmap.SP_ComputerIcon
+            )
 
-        # Use a standard Windows/Qt icon.
-        #
-        # Important:
-        # QStyle.SP_ComputerIcon is the correct enum.
-        icon = self.main_window.style().standardIcon(
-            QStyle.StandardPixmap.SP_ComputerIcon
-        )
-
+        self.tray = QSystemTrayIcon(icon)
         self.tray.setIcon(icon)
 
         self.tray.setToolTip(

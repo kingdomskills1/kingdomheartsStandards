@@ -2,6 +2,8 @@
 
 A Windows desktop notification utility for scheduling reminders, time-based alerts, and battery-level notifications.
 
+![Notification Manager icon](Notification%20Manager%20Icon.ico)
+
 The app is built with PySide6 and uses a modular notification system so new notification types can be added without changing the scheduler or application shell.
 
 ## Features
