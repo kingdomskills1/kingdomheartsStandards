@@ -11,7 +11,7 @@ from PySide6.QtCore import (
     Qt, QTimer, QEvent, QAbstractNativeEventFilter, Signal, QProcess, QPoint,
     QObject, QSettings, QRectF
 )
-from PySide6.QtGui import QAction, QKeySequence, QColor, QPainter, QPen
+from PySide6.QtGui import QAction, QKeySequence, QColor, QPainter, QPen, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QMessageBox, QStyle,
@@ -1801,6 +1801,17 @@ def main():
         None,
     )
     app = QApplication(sys.argv)
+    icon_path = Path(__file__).with_name("Video Studio Icon.ico")
+    if not icon_path.is_file():
+        icon_path = Path(sys.executable).resolve().with_name(
+            "Video Studio Icon.ico"
+        )
+    if not icon_path.is_file():
+        raise FileNotFoundError(
+            "Video Studio Icon.ico is missing. Keep it next to main.py or "
+            "Video Studio.exe."
+        )
+    app.setWindowIcon(QIcon(str(icon_path)))
     app.setOrganizationName("PythonVideoPlayer")
     app.setApplicationName("Python Video Player")
     window = VideoPlayer()

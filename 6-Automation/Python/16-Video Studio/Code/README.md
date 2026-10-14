@@ -10,6 +10,8 @@ A Windows desktop video player built with PySide6 and VLC/libVLC.
 4. Double-click `install.bat`.
 5. Double-click `start.bat`.
 
+Keep `Video Studio Icon.ico` next to `main.py` when running from source, or next to `Video Studio.exe` when running the packaged application.
+
 ## Controls
 
 - Open: choose a video or audio file.
