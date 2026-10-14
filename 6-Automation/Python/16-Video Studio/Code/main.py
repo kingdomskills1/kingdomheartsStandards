@@ -860,6 +860,9 @@ class VideoPlayer(QMainWindow):
             self.player.set_media(media)
             self.player.set_hwnd(self.active_video_hwnd)
             self.current_file = filename
+            self.setWindowTitle(
+                f"{os.path.basename(filename)} - Python Video Player"
+            )
             self.playlist_index = (
                 playlist_index
                 if playlist_index is not None

@@ -33,7 +33,17 @@ Keep `Video Studio Icon.ico` next to `main.py` when running from source, or next
 - Escape: exit full screen.
 - Ctrl + O: open a file.
 - Ctrl + Q: exit.
-- When Windows launches the player as the default app for a media file, the file passed by Windows opens automatically.
+- When Windows launches the player for a media file, that file opens in a new player window titled with its filename. Opening another media file starts another window.
+
+## Build and default app
+
+From this folder, build the one-file Windows executable with:
+
+```powershell
+pyinstaller --onefile --windowed --icon="Video Studio Icon.ico" --add-data="Video Studio Icon.ico;." main.py
+```
+
+The executable is created at `dist\main.exe`. In Windows, choose it as the default app for each desired video and audio extension from **Settings → Apps → Default apps → Choose defaults by file type**. Windows will start a separate player window for each file opened with the app.
 
 ## Supported formats
 
