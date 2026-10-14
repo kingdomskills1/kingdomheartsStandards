@@ -11,3 +11,4 @@ python doc_text_formatter.py
 
 Build the .exe
 pyinstaller --onefile --windowed copy_number_headings.py
+pyinstaller --onefile --windowed --icon="Image Studio Icon.ico" --add-data="Image Studio Icon.ico;." main.py
