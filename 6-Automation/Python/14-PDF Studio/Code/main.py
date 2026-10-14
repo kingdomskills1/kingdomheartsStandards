@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from pdf_viewer import PDFViewer
@@ -874,6 +874,13 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("PDF Studio")
+    app_icon = QIcon(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "PDF Studio Icon.ico",
+        )
+    )
+    app.setWindowIcon(app_icon)
 
     app.setStyle("Fusion")
 
@@ -899,6 +906,7 @@ def main():
                 return
 
     window = MainWindow()
+    window.setWindowIcon(app_icon)
     if server is not None:
         server.newConnection.connect(
             lambda: open_instance_requests(server, window)
