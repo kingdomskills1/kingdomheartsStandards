@@ -4,6 +4,7 @@ A lightweight PDF viewer and editor built with Python and PySide6.
 
 Overview
 - Open one or multiple PDF files in separate tabs
+- Reopen recently used PDFs from a quick-access menu
 - View PDF pages and navigate between them
 - Manage nested PDF bookmarks in a show/hide sidebar
 - Create blank PDFs and update pages by adding, deleting, reordering, or rotating

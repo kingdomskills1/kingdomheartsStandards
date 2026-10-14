@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QPushButton,
     QLabel,
+    QMenu,
 )
 from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtGui import QAction, QKeySequence
@@ -373,6 +374,12 @@ class MainWindow(QMainWindow):
 
         self.home_toolbar.addAction(open_multiple_action)
 
+        self.recent_files_menu = QMenu("Recent PDFs", self)
+        self.recent_action = QAction("Recent PDFs", self)
+        self.recent_action.setMenu(self.recent_files_menu)
+        self.refresh_recent_files_menu()
+        self.home_toolbar.addAction(self.recent_action)
+
         self.home_toolbar.addSeparator()
 
         create_action = QAction("Create PDF", self)
@@ -422,6 +429,119 @@ class MainWindow(QMainWindow):
         self.home_toolbar.addAction(
             compress_action
         )
+
+    def load_recent_pdfs(self):
+        if not hasattr(self, "recent_pdfs_file"):
+            self.recent_pdfs_file = os.path.join(
+                os.path.expanduser("~"),
+                ".pdf_studio_recent_pdfs.txt",
+            )
+
+        try:
+            if not os.path.exists(self.recent_pdfs_file):
+                return []
+
+            with open(self.recent_pdfs_file, "r", encoding="utf-8") as file:
+                entries = [
+                    os.path.abspath(line.strip())
+                    for line in file
+                    if line.strip()
+                ]
+        except OSError:
+            return []
+
+        unique_paths = []
+        seen = set()
+        for file_path in entries:
+            normalized = os.path.normcase(os.path.abspath(file_path))
+            if normalized in seen or not os.path.isfile(normalized):
+                continue
+            seen.add(normalized)
+            unique_paths.append(normalized)
+        return unique_paths[:10]
+
+    def save_recent_pdfs(self, file_paths):
+        if not hasattr(self, "recent_pdfs_file"):
+            self.recent_pdfs_file = os.path.join(
+                os.path.expanduser("~"),
+                ".pdf_studio_recent_pdfs.txt",
+            )
+
+        directory = os.path.dirname(self.recent_pdfs_file)
+        if directory and not os.path.exists(directory):
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError:
+                return
+
+        try:
+            with open(self.recent_pdfs_file, "w", encoding="utf-8") as file:
+                for file_path in file_paths:
+                    file.write(f"{file_path}\n")
+        except OSError:
+            pass
+
+    def add_recent_pdf(self, file_path):
+        if not file_path:
+            return
+
+        normalized_path = os.path.normcase(os.path.abspath(file_path))
+        if not os.path.isfile(normalized_path):
+            return
+
+        recent_paths = [
+            os.path.normcase(os.path.abspath(path))
+            for path in self.load_recent_pdfs()
+        ]
+        recent_paths = [
+            path for path in recent_paths if path != normalized_path
+        ]
+        recent_paths.insert(0, normalized_path)
+        recent_paths = recent_paths[:10]
+
+        self.save_recent_pdfs(recent_paths)
+        if hasattr(self, "recent_files_menu"):
+            self.refresh_recent_files_menu()
+
+    def open_recent_pdf(self, file_path):
+        if not file_path or not os.path.isfile(file_path):
+            QMessageBox.warning(
+                self,
+                "Recent PDF",
+                f"This recent PDF is no longer available:\n\n{file_path}",
+            )
+            return
+        self.add_pdf_tab(file_path)
+
+    def clear_recent_pdfs(self):
+        self.save_recent_pdfs([])
+        if hasattr(self, "recent_files_menu"):
+            self.refresh_recent_files_menu()
+
+    def refresh_recent_files_menu(self):
+        if not hasattr(self, "recent_files_menu"):
+            return
+
+        self.recent_files_menu.clear()
+        recent_paths = self.load_recent_pdfs()
+
+        if not recent_paths:
+            no_recent_action = QAction("No recent PDFs", self)
+            no_recent_action.setEnabled(False)
+            self.recent_files_menu.addAction(no_recent_action)
+            return
+
+        for file_path in recent_paths:
+            action = QAction(file_path, self)
+            action.triggered.connect(
+                lambda _checked=False, path=file_path: self.open_recent_pdf(path)
+            )
+            self.recent_files_menu.addAction(action)
+
+        self.recent_files_menu.addSeparator()
+        clear_action = QAction("Clear Recent PDFs", self)
+        clear_action.triggered.connect(self.clear_recent_pdfs)
+        self.recent_files_menu.addAction(clear_action)
 
     def create_tabs(self):
         self.tabs = QTabWidget()
@@ -635,6 +755,8 @@ class MainWindow(QMainWindow):
 
             file_name = file_path.split("/")[-1]
             file_name = file_name.split("\\")[-1]
+
+            self.add_recent_pdf(file_path)
 
             index = self.tabs.addTab(viewer, file_name)
             self.tabs.setCurrentIndex(index)
