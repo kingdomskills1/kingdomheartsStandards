@@ -26,9 +26,18 @@ class ImageViewer(
     def __init__(self, root):
         self.root = root
         self.root.title("Image Viewer")
-        self.root.iconbitmap(
-            str(Path(__file__).with_name("Image Studio Icon.ico"))
-        )
+        icon_path = Path(__file__).with_name("Image Studio Icon.ico")
+        if not icon_path.is_file():
+            icon_path = Path(sys.executable).resolve().with_name(
+                "Image Studio Icon.ico"
+            )
+        if not icon_path.is_file():
+            raise FileNotFoundError(
+                "Image Studio Icon.ico is missing. When packaging with "
+                "PyInstaller, include it with "
+                '--add-data "Image Studio Icon.ico;.".'
+            )
+        self.root.iconbitmap(str(icon_path))
         self.root.geometry("1100x750")
         self.root.minsize(500, 350)
         self.root.configure(bg="#202020")

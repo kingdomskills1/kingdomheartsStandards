@@ -104,6 +104,13 @@ Typical Usage
 6. Choose Register with Windows, then select Image Viewer for the desired file
    types in Windows Settings > Apps > Default apps.
 
+Packaging as a Windows Executable
+----------------------------------
+When building with PyInstaller, include the icon as both the executable icon
+and a bundled data file so the running application can load it:
+
+pyinstaller --onefile --windowed --icon="Image Studio Icon.ico" --add-data="Image Studio Icon.ico;." main.py
+
 Windows Default App Registration
 -------------------------------
 Registration is per-user and does not change existing Windows defaults. The
