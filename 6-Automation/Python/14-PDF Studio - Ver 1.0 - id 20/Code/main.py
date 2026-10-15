@@ -416,7 +416,7 @@ class MainWindow(QMainWindow):
 
         # Export Dialog
         self.home_toolbar.addSeparator()
-        export_action = QAction("Export", self)
+        export_action = QAction("PDF to Images", self)
         export_action.triggered.connect(self.export_current_pdf)
         self.home_toolbar.addAction(export_action)
 

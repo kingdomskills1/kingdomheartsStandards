@@ -10,7 +10,7 @@ Overview
 - Create blank PDFs and update pages by adding, deleting, reordering, or rotating
 - Add pages and place text, images, shapes, arrows, and interactive form fields visually
 - Add multiple selected images as full-page PDF image pages
-- Export the current PDF page
+- Export the current page, selected pages or ranges, or all PDF pages to PNG or JPG images
 - Split a PDF into parts
 - Merge multiple PDFs
 - Compress an existing PDF
@@ -18,7 +18,7 @@ Overview
 Project layout
 - main.py              Main application window and menu actions
 - pdf_viewer.py        PDF viewing logic and page navigation
-- export_dialog.py     Export dialog for exporting current page
+- export_dialog.py     Export dialog for converting selected or all PDF pages to images
 - split_dialog.py      Dialog for splitting PDFs
 - merge_dialog.py      Dialog for combining multiple PDFs
 - compress_dialog.py   Dialog for reducing PDF file size
