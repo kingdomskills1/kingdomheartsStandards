@@ -28,6 +28,7 @@ class ExportWorker(QObject):
         pages,
         output_folder,
         image_format,
+        name_format,
         dpi,
     ):
         super().__init__()
@@ -36,6 +37,7 @@ class ExportWorker(QObject):
         self.pages = pages
         self.output_folder = output_folder
         self.image_format = image_format
+        self.name_format = name_format
         self.dpi = dpi
 
         self.cancel_requested = False
@@ -75,10 +77,16 @@ class ExportWorker(QObject):
                     alpha=False,
                 )
 
+                if self.name_format == "page_number":
+                    output_name = f"{page_number}"
+                else:
+                    output_name = (
+                        f"{base_name}_page_{page_number}"
+                    )
+
                 output_file = os.path.join(
                     self.output_folder,
-                    f"{base_name}_page_{page_number}."
-                    f"{self.image_format}",
+                    f"{output_name}.{self.image_format}",
                 )
 
                 if self.image_format == "png":
@@ -161,6 +169,20 @@ class ExportDialog(QDialog):
         ])
 
         layout.addWidget(self.format_box)
+
+        layout.addWidget(QLabel("Image Name:"))
+
+        self.name_box = QComboBox()
+        self.name_box.addItem(
+            "PDF name + page number",
+            "pdf_page",
+        )
+        self.name_box.addItem(
+            "Page number only",
+            "page_number",
+        )
+
+        layout.addWidget(self.name_box)
 
         layout.addWidget(QLabel("Resolution (DPI):"))
 
@@ -331,6 +353,8 @@ class ExportDialog(QDialog):
             self.format_box.currentText().lower()
         )
 
+        name_format = self.name_box.currentData()
+
         dpi = self.dpi_box.value()
 
         self.thread = QThread()
@@ -339,6 +363,7 @@ class ExportDialog(QDialog):
             pages,
             output_folder,
             image_format,
+            name_format,
             dpi,
         )
 

@@ -10,7 +10,7 @@ Overview
 - Create blank PDFs and update pages by adding, deleting, reordering, or rotating
 - Add pages and place text, images, shapes, arrows, and interactive form fields visually
 - Add multiple selected images as full-page PDF image pages
-- Export the current page, selected pages or ranges, or all PDF pages to PNG or JPG images
+- Export the current page, selected pages or ranges, or all PDF pages to PNG or JPG images, with PDF-name-plus-page-number or page-number-only filenames
 - Split a PDF into parts
 - Merge multiple PDFs
 - Compress an existing PDF
