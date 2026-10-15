@@ -6,6 +6,7 @@ import ctypes
 import json
 import subprocess
 import tempfile
+from functools import cmp_to_key
 from ctypes import wintypes
 from pathlib import Path
 
@@ -34,6 +35,11 @@ VIDEO_EXTENSIONS = {
     ".divx", ".asf", ".rm", ".rmvb",
 }
 TRANSPORT_STREAM_EXTENSIONS = {".ts", ".mts", ".m2ts"}
+_WINDOWS_LOGICAL_COMPARE = ctypes.WinDLL(
+    "shlwapi", use_last_error=True
+).StrCmpLogicalW
+_WINDOWS_LOGICAL_COMPARE.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR)
+_WINDOWS_LOGICAL_COMPARE.restype = ctypes.c_int
 PLAYBACK_MODES = {
     "Play next": "next",
     "Play previous": "previous",
@@ -1607,7 +1613,12 @@ class VideoPlayer(QMainWindow):
                     for path in folder.iterdir()
                     if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
                 ),
-                key=lambda path: (Path(path).name.casefold(), path.casefold()),
+                key=cmp_to_key(
+                    lambda left, right: _WINDOWS_LOGICAL_COMPARE(
+                        Path(left).name,
+                        Path(right).name,
+                    )
+                ),
             )
         except OSError as exc:
             QMessageBox.warning(
