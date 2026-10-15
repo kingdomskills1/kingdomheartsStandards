@@ -5,12 +5,13 @@ import shutil
 import ctypes
 import json
 import subprocess
+import tempfile
 from ctypes import wintypes
 from pathlib import Path
 
 from PySide6.QtCore import (
     Qt, QTimer, QEvent, QAbstractNativeEventFilter, Signal, QProcess, QPoint,
-    QObject, QSettings, QRectF
+    QObject, QSettings, QRectF, QRunnable, QThreadPool
 )
 from PySide6.QtGui import QAction, QKeySequence, QColor, QPainter, QPen, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -32,6 +33,7 @@ VIDEO_EXTENSIONS = {
     ".mpg", ".m4v", ".3gp", ".ts", ".mts", ".m2ts", ".vob", ".ogv",
     ".divx", ".asf", ".rm", ".rmvb",
 }
+TRANSPORT_STREAM_EXTENSIONS = {".ts", ".mts", ".m2ts"}
 PLAYBACK_MODES = {
     "Play next": "next",
     "Play previous": "previous",
@@ -176,6 +178,26 @@ class SeekSlider(QSlider):
 
 class PlayerSignals(QObject):
     end_reached = Signal()
+
+
+class TemporaryDirectoryCleanupSignals(QObject):
+    failed = Signal(str)
+
+
+class TemporaryDirectoryCleanup(QRunnable):
+    def __init__(self, temp_dir, signals):
+        super().__init__()
+        self.temp_dir = temp_dir
+        self.signals = signals
+
+    def run(self):
+        try:
+            self.temp_dir.cleanup()
+        except OSError as exc:
+            self.signals.failed.emit(
+                f"Could not remove temporary playback files "
+                f"from {self.temp_dir.name}.\n\n{exc}"
+            )
 
 
 class SingleInstanceServer(QObject):
@@ -511,6 +533,14 @@ class VideoPlayer(QMainWindow):
         self.was_playing_before_seek = False
         self.playback_ended = False
         self.pending_resume_position_ms = None
+        self.pending_ts_file = None
+        self.pending_ts_playlist_index = None
+        self.pending_ts_temp_dir = None
+        self.pending_ts_audio_repair = False
+        self.playback_temp_dir = None
+        self.ts_remux_error_output = bytearray()
+        self.temp_cleanup_signals = TemporaryDirectoryCleanupSignals(self)
+        self.temp_cleanup_signals.failed.connect(self._show_temp_cleanup_error)
         self.is_fullscreen = False
         self.trim_start_ms = None
         self.trim_end_ms = None
@@ -536,6 +566,12 @@ class VideoPlayer(QMainWindow):
         self.trim_process.readyReadStandardError.connect(self._read_trim_stderr)
         self.trim_process.finished.connect(self._trim_finished)
         self.trim_process.errorOccurred.connect(self._trim_process_error)
+        self.ts_remux_process = QProcess(self)
+        self.ts_remux_process.readyReadStandardError.connect(
+            self._read_ts_remux_stderr
+        )
+        self.ts_remux_process.finished.connect(self._ts_remux_finished)
+        self.ts_remux_process.errorOccurred.connect(self._ts_remux_process_error)
         self.video_hwnd = int(self.video_surface.winId())
         self.trim_video_hwnd = int(self.trim_window.video_surface.winId())
         self.active_video_hwnd = self.video_hwnd
@@ -584,7 +620,7 @@ class VideoPlayer(QMainWindow):
         self.position_slider.setSingleStep(1)
         self.position_slider.setPageStep(10)
         self.position_slider.setToolTip(
-            "Click or drag to seek; use Left/Right arrows to seek"
+            "Click or drag to seek; Left/Right seek 10 seconds; Alt+Left/Right seek 1 second"
         )
         self.position_slider.sliderPressed.connect(self._seek_started)
         self.position_slider.sliderReleased.connect(self._seek_finished)
@@ -812,12 +848,12 @@ class VideoPlayer(QMainWindow):
 
     def _build_shortcuts(self):
         shortcuts = [
-            ("Left", lambda: self._seek_by_slider_step(-1)),
-            ("Right", lambda: self._seek_by_slider_step(1)),
+            ("Left", lambda: self.skip(-10000)),
+            ("Right", lambda: self.skip(10000)),
             ("Up", lambda: self._adjust_volume_by_step(1)),
             ("Down", lambda: self._adjust_volume_by_step(-1)),
-            ("Alt+Left", lambda: self.skip(-10000)),
-            ("Alt+Right", lambda: self.skip(10000)),
+            ("Alt+Left", lambda: self.skip(-1000)),
+            ("Alt+Right", lambda: self.skip(1000)),
             ("Ctrl+Left", lambda: self.skip(-60000)),
             ("Ctrl+Right", lambda: self.skip(60000)),
             ("M", self.toggle_mute),
@@ -999,9 +1035,250 @@ class VideoPlayer(QMainWindow):
         if not os.path.isfile(filename):
             QMessageBox.warning(self, "File not found", "The selected video file no longer exists.")
             return
+        if (
+            self.pending_ts_file is not None
+            and self._normalized_media_path(self.pending_ts_file)
+            == self._normalized_media_path(filename)
+        ):
+            return
+        if (
+            Path(filename).suffix.lower() in TRANSPORT_STREAM_EXTENSIONS
+            and self.current_file
+            and self._normalized_media_path(self.current_file)
+            == self._normalized_media_path(filename)
+            and self.player.get_media() is not None
+        ):
+            self._restart_current_file()
+            return
+        if not self._cancel_ts_remux():
+            return
+        if Path(filename).suffix.lower() in TRANSPORT_STREAM_EXTENSIONS:
+            self._prepare_ts_for_playback(filename, playlist_index)
+            return
+        self._start_playback(filename, filename, playlist_index)
+
+    def _restart_current_file(self):
+        self.playback_ended = False
+        self.pending_resume_position_ms = None
+        self.playlist_index = -1
+        self.player.set_time(0)
+        if not self.player.is_playing():
+            self.player.play()
+        self.position_slider.setValue(0)
+        self.current_time.setText("00:00")
+        self._set_playback_button_text("Pause")
+        self.trim_play_button.setEnabled(True)
+
+    def _prepare_ts_for_playback(self, filename, playlist_index):
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            QMessageBox.warning(
+                self,
+                "FFmpeg required",
+                "FFmpeg was not found on PATH. The transport stream will play "
+                "directly, but seeking may be less responsive.",
+            )
+            self._start_playback(filename, filename, playlist_index)
+            return
+
         try:
-            media = self.instance.media_new_path(os.path.abspath(filename))
+            self.pending_ts_temp_dir = tempfile.TemporaryDirectory(
+                prefix="video_studio_ts_"
+            )
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "TS preparation failed",
+                f"Could not create temporary playback storage.\n\n{exc}\n\n"
+                "The original file will be played instead.",
+            )
+            self._start_playback(filename, filename, playlist_index)
+            return
+        output_file = str(Path(self.pending_ts_temp_dir.name) / "prepared.mp4")
+        self.pending_ts_file = filename
+        self.pending_ts_playlist_index = playlist_index
+        self.pending_ts_audio_repair = False
+        self.ts_remux_error_output.clear()
+        if self.player and self.player.is_playing():
+            self.player.pause()
+        self._set_playback_button_text("Play")
+        self.playback_ended = False
+        self.pending_resume_position_ms = None
+        self.position_slider.setEnabled(False)
+        self.play_button.setEnabled(False)
+        self.trim_play_button.setEnabled(False)
+        self.trim_window.timeline.setEnabled(False)
+        self.now_playing.setText(
+            f"Preparing {Path(filename).name} for smooth seeking..."
+        )
+        self.current_time.setText("Preparing...")
+
+        self.ts_remux_process.start(
+            ffmpeg,
+            self._build_ts_remux_arguments(filename, output_file),
+        )
+
+    @staticmethod
+    def _build_ts_remux_arguments(filename, output_file, repair_audio=False):
+        arguments = [
+            "-y",
+            "-v", "error",
+            "-i", os.path.abspath(filename),
+        ]
+        if repair_audio:
+            arguments.extend([
+                "-map", "0:v?",
+                "-map", "0:a?",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+            ])
+        else:
+            arguments.extend([
+                "-map", "0",
+                "-c", "copy",
+            ])
+        arguments.extend([
+            "-movflags", "+faststart",
+            output_file,
+        ])
+        return arguments
+
+    def _read_ts_remux_stderr(self):
+        self.ts_remux_error_output.extend(
+            bytes(self.ts_remux_process.readAllStandardError())
+        )
+
+    def _ts_remux_process_error(self, error):
+        if (
+            error == QProcess.ProcessError.FailedToStart
+            and self.pending_ts_file is not None
+        ):
+            self._finish_ts_remux(
+                -1,
+                QProcess.ExitStatus.CrashExit,
+            )
+
+    def _ts_remux_finished(self, exit_code, exit_status):
+        self._finish_ts_remux(exit_code, exit_status)
+
+    def _finish_ts_remux(self, exit_code, exit_status):
+        if self.pending_ts_file is None:
+            return
+
+        self._read_ts_remux_stderr()
+        filename = self.pending_ts_file
+        playlist_index = self.pending_ts_playlist_index
+        temp_dir = self.pending_ts_temp_dir
+        repair_audio = self.pending_ts_audio_repair
+        output_file = (
+            str(
+                Path(temp_dir.name)
+                / ("prepared_repaired.mp4" if repair_audio else "prepared.mp4")
+            )
+            if temp_dir
+            else ""
+        )
+        error_details = self.ts_remux_error_output.decode(
+            "utf-8", errors="replace"
+        ).strip()
+
+        if (
+            exit_status == QProcess.ExitStatus.NormalExit
+            and exit_code == 0
+            and os.path.isfile(output_file)
+            and os.path.getsize(output_file) > 0
+        ):
+            self.pending_ts_file = None
+            self.pending_ts_playlist_index = None
+            self.pending_ts_temp_dir = None
+            self.pending_ts_audio_repair = False
+            self._start_playback(
+                filename,
+                output_file,
+                playlist_index,
+                temp_dir,
+            )
+            return
+
+        if (
+            not repair_audio
+            and "Error parsing ADTS frame header" in error_details
+            and temp_dir is not None
+        ):
+            ffmpeg = shutil.which("ffmpeg")
+            if ffmpeg:
+                self.pending_ts_audio_repair = True
+                self.ts_remux_error_output.clear()
+                self.ts_remux_process.start(
+                    ffmpeg,
+                    self._build_ts_remux_arguments(
+                        filename,
+                        str(Path(temp_dir.name) / "prepared_repaired.mp4"),
+                        repair_audio=True,
+                    ),
+                )
+                return
+
+        self.pending_ts_file = None
+        self.pending_ts_playlist_index = None
+        self.pending_ts_temp_dir = None
+        self.pending_ts_audio_repair = False
+        self._cleanup_ts_temp_dir(temp_dir)
+        QMessageBox.warning(
+            self,
+            "TS preparation failed",
+            "Could not prepare this transport stream for smooth seeking. "
+            "The original file will be played instead."
+            + (
+                f"\n\nFFmpeg details:\n{error_details}"
+                if error_details
+                else ""
+            ),
+        )
+        self._start_playback(filename, filename, playlist_index)
+
+    def _cancel_ts_remux(self):
+        self.pending_ts_file = None
+        self.pending_ts_playlist_index = None
+        self.pending_ts_audio_repair = False
+        if self.ts_remux_process.state() != QProcess.ProcessState.NotRunning:
+            self.ts_remux_process.kill()
+            if not self.ts_remux_process.waitForFinished(3000):
+                QMessageBox.warning(
+                    self,
+                    "TS preparation",
+                    "Could not stop the current TS preparation process.",
+                )
+                return False
+        temp_dir = self.pending_ts_temp_dir
+        self.pending_ts_temp_dir = None
+        self._cleanup_ts_temp_dir(temp_dir)
+        return True
+
+    def _cleanup_ts_temp_dir(self, temp_dir):
+        if temp_dir is None:
+            return
+        QThreadPool.globalInstance().start(
+            TemporaryDirectoryCleanup(temp_dir, self.temp_cleanup_signals)
+        )
+
+    def _show_temp_cleanup_error(self, message):
+        QMessageBox.warning(self, "Temporary file cleanup", message)
+
+    def _start_playback(
+        self,
+        filename,
+        playback_filename,
+        playlist_index=None,
+        playback_temp_dir=None,
+    ):
+        try:
+            media = self.instance.media_new_path(os.path.abspath(playback_filename))
             self.player.set_media(media)
+            previous_temp_dir = self.playback_temp_dir
+            self.playback_temp_dir = playback_temp_dir
+            self._cleanup_ts_temp_dir(previous_temp_dir)
             self.player.set_hwnd(self.active_video_hwnd)
             self.current_file = filename
             self.setWindowTitle(
@@ -1019,12 +1296,17 @@ class VideoPlayer(QMainWindow):
             self.position_slider.setValue(0)
             self.current_time.setText("00:00")
             self.total_time.setText("00:00")
+            self.position_slider.setEnabled(True)
+            self.play_button.setEnabled(True)
+            self.trim_window.timeline.setEnabled(True)
             self.player.play()
             self._set_playback_button_text("Pause")
             self.trim_play_button.setEnabled(True)
             self.set_volume(self.volume_slider.value())
             self._add_recent_file(filename)
         except Exception as exc:
+            if self.playback_temp_dir is not playback_temp_dir:
+                self._cleanup_ts_temp_dir(playback_temp_dir)
             QMessageBox.critical(self, "Playback error", f"Could not open this file.\n\n{exc}")
 
     def _add_recent_file(self, filename):
@@ -1877,6 +2159,8 @@ class VideoPlayer(QMainWindow):
         )
 
     def toggle_play_pause(self):
+        if self.pending_ts_file is not None:
+            return
         if not self.player:
             return
         try:
@@ -1900,6 +2184,18 @@ class VideoPlayer(QMainWindow):
             QMessageBox.warning(self, "Playback error", str(exc))
 
     def stop(self):
+        if self.pending_ts_file is not None:
+            if not self._cancel_ts_remux():
+                return
+            self.now_playing.setText(
+                os.path.basename(self.current_file)
+                if self.current_file
+                else "Open a video to begin"
+            )
+            self.position_slider.setEnabled(True)
+            self.play_button.setEnabled(True)
+            self.trim_play_button.setEnabled(bool(self.current_file))
+            self.trim_window.timeline.setEnabled(True)
         if self.player:
             self.player.stop()
         self.playback_ended = False
@@ -1914,19 +2210,7 @@ class VideoPlayer(QMainWindow):
         length = self.player.get_length()
         current = self.player.get_time()
         if length > 0 and current >= 0:
-            self.player.set_time(max(0, min(length, current + milliseconds)))
-
-    def _seek_by_slider_step(self, direction):
-        value = max(
-            self.position_slider.minimum(),
-            min(
-                self.position_slider.maximum(),
-                self.position_slider.value()
-                + direction * self.position_slider.singleStep(),
-            ),
-        )
-        self.position_slider.setValue(value)
-        self._seek_to_position(value)
+            self._seek_player_to(max(0, min(length, current + milliseconds)))
 
     def _adjust_volume_by_step(self, direction):
         self.volume_slider.setValue(
@@ -2002,6 +2286,8 @@ class VideoPlayer(QMainWindow):
                 self._seek_player_to(position_ms)
 
     def _seek_player_to(self, position_ms):
+        if self.pending_ts_file is not None:
+            return
         if self.playback_ended:
             self.pending_resume_position_ms = position_ms
         else:
@@ -2054,6 +2340,9 @@ class VideoPlayer(QMainWindow):
             pass
 
     def closeEvent(self, event):
+        if not self._cancel_ts_remux():
+            event.ignore()
+            return
         self.timer.stop()
         if self.player:
             try:
@@ -2061,6 +2350,9 @@ class VideoPlayer(QMainWindow):
                 self.player.release()
             except Exception:
                 pass
+        playback_temp_dir = self.playback_temp_dir
+        self.playback_temp_dir = None
+        self._cleanup_ts_temp_dir(playback_temp_dir)
         if self.instance:
             try:
                 self.instance.release()

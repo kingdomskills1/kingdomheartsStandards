@@ -5,7 +5,7 @@ A Windows desktop video player built with PySide6 and VLC/libVLC.
 ## Setup
 
 1. Install the 64-bit VLC desktop application: https://www.videolan.org/vlc/
-2. Install FFmpeg and make sure `ffmpeg` and `ffprobe` are available on PATH to trim or join media.
+2. Install FFmpeg and make sure `ffmpeg` is available on PATH for transport-stream playback and trimming; `ffprobe` is also required to join media.
 3. Make sure Python is installed and the `py` command works.
 4. Double-click `install.bat`.
 5. Double-click `start.bat`.
@@ -25,13 +25,14 @@ Keep `Video Studio Icon.ico` next to `main.py` when running from source, or next
 - Space: play/pause.
 - Click or drag the seek bar to change playback position.
 - After playback ends, click or drag the seek bar to a position and press **Play** to resume from there.
+- Transport-stream files (`.ts`, `.mts`, `.m2ts`) are prepared as temporary MP4 files before playback to enable exact, indexed seeking. FFmpeg copies streams without re-encoding when possible. If malformed AAC packets prevent a stream copy, the video is copied unchanged and audio is re-encoded to AAC; other TS-only metadata streams are omitted in that fallback. The temporary copy is removed when the media is replaced or the player closes. If FFmpeg is unavailable or preparation fails, the original transport stream plays instead.
 - Volume: raise the volume slider above 100% to boost quiet audio, up to 200%. Boosting can cause distortion on some media or speakers.
 - Zoom from 100% to 300% with the Zoom slider or mouse wheel over the video (wheel zoom stays centered on the pointer); left- or right-drag the zoomed video to pan. Click **Reset View** to restore it. Zoom and pan work while playing or paused.
 - `]` / `[`: zoom in/out; `R`: reset zoom and position. `W` / `A` / `S` / `D`: pan up/left/down/right when zoomed. Stop playback with **Ctrl+S**.
 - S: stop.
-- Left / Right: seek the video by one seek-slider step; these keys do not change volume.
+- Left / Right: seek 10 seconds backward/forward, regardless of slider focus.
 - Up / Down: adjust volume by 1%; these keys do not seek the video.
-- Alt + Left / Right: seek 10 seconds backward/forward, regardless of slider focus.
+- Alt + Left / Right: seek 1 second backward/forward, regardless of slider focus.
 - Ctrl + Left / Right: seek 60 seconds backward/forward.
 - Reset: restore volume to 80%.
 - M: mute/unmute.
