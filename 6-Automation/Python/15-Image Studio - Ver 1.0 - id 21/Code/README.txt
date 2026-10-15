@@ -28,6 +28,8 @@ Core Features
 -------------
 - Open one image from disk
 - Browse through images in the same folder
+- Previous/Next follows Windows natural filename order (for example,
+  image1, image2, image10)
 - Reopen the 10 most recently opened files
 - Load and play animated GIF files without blocking the window
 - Register as a Windows Default apps option for supported image formats
@@ -51,6 +53,7 @@ The main window has:
 Keyboard and Mouse Controls
 ---------------------------
 - Ctrl+O: open image
+- Ctrl+C: copy the current image file to the clipboard
 - Hover over Recent Files to open a recent image
 - F: toggle fullscreen
 - Left Arrow: previous image

@@ -1,10 +1,42 @@
+import ctypes
+import os
 import queue
+import struct
 import threading
 import time
+from functools import cmp_to_key
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageOps, ImageTk
+from ctypes import wintypes
+
+
+if os.name == "nt":
+    _shlwapi = ctypes.WinDLL("Shlwapi.dll")
+    _str_cmp_logical = _shlwapi.StrCmpLogicalW
+    _str_cmp_logical.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p)
+    _str_cmp_logical.restype = ctypes.c_int
+else:
+    _str_cmp_logical = None
+
+
+def _compare_folder_image_names(left, right):
+    if _str_cmp_logical is not None:
+        result = _str_cmp_logical(left.name, right.name)
+        if result:
+            return result
+
+    left_name = left.name.lower()
+    right_name = right.name.lower()
+    if left_name != right_name:
+        return (left_name > right_name) - (left_name < right_name)
+    return (left.name > right.name) - (left.name < right.name)
+
+
+def _file_drop_clipboard_data(path):
+    wide_path = (str(path.resolve()) + "\0\0").encode("utf-16le")
+    return struct.pack("<IiiII", 20, 0, 0, 0, 1) + wide_path
 
 
 class ViewerImageMixin:
@@ -21,6 +53,72 @@ class ViewerImageMixin:
 
         if filename:
             self.load_image(filename)
+
+    def copy_current_file(self):
+        if self.image_path is None:
+            self.status.configure(text="Open an image before copying it")
+            return "break"
+
+        if os.name != "nt":
+            messagebox.showerror(
+                "Unable to Copy Image",
+                "Copying image files to the clipboard is supported on Windows."
+            )
+            return "break"
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.OpenClipboard.argtypes = (wintypes.HWND,)
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.CloseClipboard.restype = wintypes.BOOL
+        kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+        kernel32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+        kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+        memory_handle = None
+        clipboard_open = False
+        ownership_transferred = False
+        try:
+            data = _file_drop_clipboard_data(self.image_path)
+            memory_handle = kernel32.GlobalAlloc(0x0002, len(data))
+            if not memory_handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+
+            memory_pointer = kernel32.GlobalLock(memory_handle)
+            if not memory_pointer:
+                raise ctypes.WinError(ctypes.get_last_error())
+            ctypes.memmove(memory_pointer, data, len(data))
+            kernel32.GlobalUnlock(memory_handle)
+
+            if not user32.OpenClipboard(self.root.winfo_id()):
+                raise ctypes.WinError(ctypes.get_last_error())
+            clipboard_open = True
+            if not user32.EmptyClipboard():
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not user32.SetClipboardData(15, memory_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            ownership_transferred = True
+            self.status.configure(text=f"Copied {self.image_path.name}")
+        except OSError as error:
+            messagebox.showerror(
+                "Unable to Copy Image",
+                f"Could not copy this image to the clipboard:\n\n{error}"
+            )
+        finally:
+            if clipboard_open:
+                user32.CloseClipboard()
+            if memory_handle and not ownership_transferred:
+                kernel32.GlobalFree(memory_handle)
+
+        return "break"
 
     def load_image(self, filename):
         try:
@@ -286,7 +384,7 @@ class ViewerImageMixin:
                 if file.is_file()
                 and file.suffix.lower() in self.SUPPORTED_FORMATS
             ),
-            key=lambda file: file.name.lower()
+            key=cmp_to_key(_compare_folder_image_names)
         )
 
         try:

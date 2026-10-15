@@ -264,6 +264,7 @@ class ViewerUIMixin:
 
     def _bind_shortcuts(self):
         self.root.bind("<Control-o>", lambda event: self.open_image())
+        self.root.bind("<Control-c>", lambda event: self.copy_current_file())
         self.root.bind("<Left>", lambda event: self.previous_image())
         self.root.bind("<Right>", lambda event: self.next_image())
         self.root.bind("<plus>", lambda event: self.change_zoom(1.2))
