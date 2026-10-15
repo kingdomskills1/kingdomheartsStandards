@@ -17,23 +17,30 @@ Keep `Video Studio Icon.ico` next to `main.py` when running from source, or next
 - Open: choose a video or audio file.
 - Recent videos: find the last 10 opened files under **File → Recent videos**. The list is saved between runs; use **Clear recent videos** to empty it.
 - Playlist: open the separate Playlist window with the **Playlist** button or **Ctrl+L**. Close that window to hide it; use the button or shortcut to reopen it without losing the list. Add media, double-click an item to play it, use **Previous Track** / **Next Track** to navigate, and choose **Save Playlist** or **Load Playlist** to reuse `.m3u8`/`.m3u` playlists. Playback advances automatically to the next item.
+- Main playback controls: use **Previous** and **Next** beside **Play** to navigate the active playlist, or the current video's folder when it is not in a playlist.
+- Playback mode: choose **Play next** to advance through the current playlist or, when playing a file directly, the videos in its folder; **Play previous** to move backward through that playlist or folder; **Play once** to play the current file to its end, then stop; **Repeat once** to play the active playlist or, for a file opened directly, the current file's folder in order once, then stop at the last item; **Repeat all** to loop the active playlist when playback was started from the playlist, or loop the current file's folder when playback was started directly; or **Random in folder** to play a different video from the current file's folder at random.
 - Trim: open the separate trim window with **Trim** or **Ctrl+T**. It shows the current video and a timeline with green start, red end, and white playback-position markers. Click or drag the timeline to seek the video, and use the **Play** / **Pause** button to control playback. Prominent start, end, and selected-duration readouts show precise milliseconds and update when markers are set or changed. Close it to hide the controls; reopen it later without losing the current trim markers or export progress.
 - Join Videos: select at least two videos to combine them into one file. The app normalizes size and frame rate, supports MP4, MKV, MOV, WebM, or AVI output, and shows export progress.
 - To trim: play or seek to the desired start and click **Set Trim Start**; move to the desired end and click **Set Trim End**, then click **Save Trimmed As...** and choose MP4, MKV, MOV, WebM, AVI, or GIF. A progress bar shows the export percentage.
 - Space: play/pause.
 - Click or drag the seek bar to change playback position.
+- After playback ends, click or drag the seek bar to a position and press **Play** to resume from there.
+- Volume: raise the volume slider above 100% to boost quiet audio, up to 200%. Boosting can cause distortion on some media or speakers.
 - Zoom from 100% to 300% with the Zoom slider or mouse wheel over the video (wheel zoom stays centered on the pointer); left- or right-drag the zoomed video to pan. Click **Reset View** to restore it. Zoom and pan work while playing or paused.
 - `]` / `[`: zoom in/out; `R`: reset zoom and position. `W` / `A` / `S` / `D`: pan up/left/down/right when zoomed. Stop playback with **Ctrl+S**.
 - S: stop.
-- Left / Right: seek 10 seconds backward/forward.
+- Left / Right: seek the video by one seek-slider step; these keys do not change volume.
+- Up / Down: adjust volume by 1%; these keys do not seek the video.
+- Alt + Left / Right: seek 10 seconds backward/forward, regardless of slider focus.
 - Ctrl + Left / Right: seek 60 seconds backward/forward.
+- Reset: restore volume to 80%.
 - M: mute/unmute.
 - F: toggle full screen.
 - Double-click the video area or window: toggle full screen.
 - Escape: exit full screen.
 - Ctrl + O: open a file.
 - Ctrl + Q: exit.
-- When Windows launches the player for a media file, that file opens in a new player window titled with its filename. Opening another media file starts another window.
+- When Windows launches the player for a media file, it opens in the player window titled with its filename. Opening another media file from File Explorer replaces the current media in the same player window.
 
 ## Build and default app
 

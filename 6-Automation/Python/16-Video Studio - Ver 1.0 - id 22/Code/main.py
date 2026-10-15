@@ -1,5 +1,6 @@
 import sys
 import os
+import random
 import shutil
 import ctypes
 import json
@@ -12,11 +13,12 @@ from PySide6.QtCore import (
     QObject, QSettings, QRectF
 )
 from PySide6.QtGui import QAction, QKeySequence, QColor, QPainter, QPen, QIcon
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QMessageBox, QStyle,
     QFrame, QSizePolicy, QStyleOptionSlider, QProgressBar, QListWidget,
-    QListWidgetItem, QAbstractItemView
+    QListWidgetItem, QAbstractItemView, QComboBox
 )
 
 try:
@@ -24,6 +26,20 @@ try:
 except ImportError:
     vlc = None
 
+
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".mpeg",
+    ".mpg", ".m4v", ".3gp", ".ts", ".mts", ".m2ts", ".vob", ".ogv",
+    ".divx", ".asf", ".rm", ".rmvb",
+}
+PLAYBACK_MODES = {
+    "Play next": "next",
+    "Play previous": "previous",
+    "Play once": "repeat_one",
+    "Repeat once": "repeat_once",
+    "Repeat all": "repeat_all",
+    "Random in folder": "random_folder",
+}
 
 MEDIA_FILTER = (
     "Media files (*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.webm *.mpeg "
@@ -160,6 +176,74 @@ class SeekSlider(QSlider):
 
 class PlayerSignals(QObject):
     end_reached = Signal()
+
+
+class SingleInstanceServer(QObject):
+    request_received = Signal(str)
+    request_error = Signal(str)
+
+    def __init__(self, server_name, parent=None):
+        super().__init__(parent)
+        self.server_name = server_name
+        self.server = QLocalServer(self)
+        self.server.newConnection.connect(self._accept_connections)
+        self.buffers = {}
+
+    def listen(self):
+        return self.server.listen(self.server_name)
+
+    def _accept_connections(self):
+        while self.server.hasPendingConnections():
+            connection = self.server.nextPendingConnection()
+            self.buffers[connection] = bytearray()
+            connection.readyRead.connect(
+                lambda client=connection: self._read_connection(client)
+            )
+            connection.disconnected.connect(
+                lambda client=connection: self._close_connection(client)
+            )
+            self._read_connection(connection)
+
+    def _read_connection(self, connection):
+        self.buffers[connection].extend(connection.readAll().data())
+        while b"\n" in self.buffers[connection]:
+            line, _, remaining = self.buffers[connection].partition(b"\n")
+            self.buffers[connection] = bytearray(remaining)
+            try:
+                requested_file = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self.request_error.emit(f"Invalid open request: {exc}")
+                connection.disconnectFromServer()
+                return
+            if not isinstance(requested_file, str):
+                self.request_error.emit("Invalid open request: expected a file path.")
+                connection.disconnectFromServer()
+                return
+            self.request_received.emit(requested_file)
+            connection.disconnectFromServer()
+            return
+
+    def _close_connection(self, connection):
+        self.buffers.pop(connection, None)
+        connection.deleteLater()
+
+
+def forward_open_request(server_name, filename):
+    connection = QLocalSocket()
+    connection.connectToServer(server_name)
+    if not connection.waitForConnected(300):
+        return False
+    message = json.dumps(filename or "").encode("utf-8") + b"\n"
+    if connection.write(message) != len(message):
+        raise RuntimeError(f"Could not send media open request: {connection.errorString()}")
+    connection.flush()
+    connection.disconnectFromServer()
+    if (
+        connection.state() != QLocalSocket.LocalSocketState.UnconnectedState
+        and not connection.waitForDisconnected(5000)
+    ):
+        raise RuntimeError(f"Could not finish media open request: {connection.errorString()}")
+    return True
 
 
 class TrimTimeline(QWidget):
@@ -425,6 +509,8 @@ class VideoPlayer(QMainWindow):
         self.playlist_window = None
         self.is_seeking = False
         self.was_playing_before_seek = False
+        self.playback_ended = False
+        self.pending_resume_position_ms = None
         self.is_fullscreen = False
         self.trim_start_ms = None
         self.trim_end_ms = None
@@ -442,7 +528,7 @@ class VideoPlayer(QMainWindow):
         self._build_shortcuts()
         self.player_signals = PlayerSignals(self)
         self.player_signals.end_reached.connect(
-            self._play_next_track,
+            self._handle_playback_end,
             Qt.ConnectionType.QueuedConnection,
         )
         self.trim_process = QProcess(self)
@@ -494,6 +580,12 @@ class VideoPlayer(QMainWindow):
 
         self.position_slider = SeekSlider(Qt.Orientation.Horizontal)
         self.position_slider.setRange(0, 1000)
+        self.position_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.position_slider.setSingleStep(1)
+        self.position_slider.setPageStep(10)
+        self.position_slider.setToolTip(
+            "Click or drag to seek; use Left/Right arrows to seek"
+        )
         self.position_slider.sliderPressed.connect(self._seek_started)
         self.position_slider.sliderReleased.connect(self._seek_finished)
         self.position_slider.sliderMoved.connect(self._seek_preview)
@@ -508,6 +600,20 @@ class VideoPlayer(QMainWindow):
         time_row.addStretch(1)
         time_row.addWidget(self.total_time)
         controls_layout.addLayout(time_row)
+
+        playback_mode_row = QHBoxLayout()
+        playback_mode_row.setContentsMargins(12, 0, 12, 4)
+        playback_mode_row.addWidget(QLabel("Playback mode"))
+        self.playback_mode = QComboBox()
+        for label, mode in PLAYBACK_MODES.items():
+            self.playback_mode.addItem(label, mode)
+        self.playback_mode.setToolTip(
+            "Choose what plays when the current video ends."
+        )
+        self.playback_mode.setMinimumWidth(180)
+        playback_mode_row.addWidget(self.playback_mode)
+        playback_mode_row.addStretch(1)
+        controls_layout.addLayout(playback_mode_row)
 
         self.playlist_window = PlaylistWindow(self)
         self.playlist_widget = self.playlist_window.playlist_widget
@@ -578,22 +684,46 @@ class VideoPlayer(QMainWindow):
         self.stop_button.clicked.connect(self.stop)
         controls.addWidget(self.stop_button)
 
+        self.previous_track_button = QPushButton("Previous")
+        self.previous_track_button.setToolTip("Play the previous track")
+        self.previous_track_button.clicked.connect(self.play_previous_track)
+        controls.addWidget(self.previous_track_button)
+
         self.play_button = QPushButton("Play")
         self.play_button.setMinimumWidth(90)
         self.play_button.clicked.connect(self.toggle_play_pause)
         controls.addWidget(self.play_button)
+
+        self.next_track_button = QPushButton("Next")
+        self.next_track_button.setToolTip("Play the next track")
+        self.next_track_button.clicked.connect(self.play_next_track)
+        controls.addWidget(self.next_track_button)
 
         self.mute_button = QPushButton("Mute")
         self.mute_button.clicked.connect(self.toggle_mute)
         controls.addWidget(self.mute_button)
 
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
-        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setRange(0, 200)
         self.volume_slider.setValue(80)
+        self.volume_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.volume_slider.setSingleStep(1)
         self.volume_slider.setMaximumWidth(140)
+        self.volume_slider.setToolTip(
+            "Volume: 100% is normal; values above 100% boost the audio; "
+            "use Up/Down arrows to adjust"
+        )
         self.volume_slider.valueChanged.connect(self.set_volume)
         controls.addWidget(QLabel("Volume"))
         controls.addWidget(self.volume_slider)
+        self.volume_value_label = QLabel(f"{self.volume_slider.value()}%")
+        self.volume_value_label.setMinimumWidth(36)
+        self.volume_value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        controls.addWidget(self.volume_value_label)
+        self.reset_volume_button = QPushButton("Reset")
+        self.reset_volume_button.setToolTip("Reset volume to 80%")
+        self.reset_volume_button.clicked.connect(self.reset_volume)
+        controls.addWidget(self.reset_volume_button)
 
         controls.addStretch(1)
         self.fullscreen_button = QPushButton("Full Screen")
@@ -682,8 +812,12 @@ class VideoPlayer(QMainWindow):
 
     def _build_shortcuts(self):
         shortcuts = [
-            ("Left", lambda: self.skip(-10000)),
-            ("Right", lambda: self.skip(10000)),
+            ("Left", lambda: self._seek_by_slider_step(-1)),
+            ("Right", lambda: self._seek_by_slider_step(1)),
+            ("Up", lambda: self._adjust_volume_by_step(1)),
+            ("Down", lambda: self._adjust_volume_by_step(-1)),
+            ("Alt+Left", lambda: self.skip(-10000)),
+            ("Alt+Right", lambda: self.skip(10000)),
             ("Ctrl+Left", lambda: self.skip(-60000)),
             ("Ctrl+Right", lambda: self.skip(60000)),
             ("M", self.toggle_mute),
@@ -846,6 +980,16 @@ class VideoPlayer(QMainWindow):
         if filename:
             self.play_file(filename)
 
+    def open_external_file(self, filename):
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        if filename:
+            self.play_file(filename)
+
     def play_file(self, filename, playlist_index=None):
         if not self.player or not self.instance:
             self._show_vlc_error(
@@ -864,10 +1008,10 @@ class VideoPlayer(QMainWindow):
                 f"{os.path.basename(filename)} - Python Video Player"
             )
             self.playlist_index = (
-                playlist_index
-                if playlist_index is not None
-                else self._find_playlist_path(filename)
+                playlist_index if playlist_index is not None else -1
             )
+            self.playback_ended = False
+            self.pending_resume_position_ms = None
             if self.playlist_index >= 0:
                 self.playlist_widget.setCurrentRow(self.playlist_index)
             self._reset_trim_markers()
@@ -929,13 +1073,6 @@ class VideoPlayer(QMainWindow):
     @staticmethod
     def _normalized_media_path(filename):
         return os.path.normcase(os.path.abspath(filename))
-
-    def _find_playlist_path(self, filename):
-        normalized = self._normalized_media_path(filename)
-        for index, path in enumerate(self.playlist_paths):
-            if self._normalized_media_path(path) == normalized:
-                return index
-        return -1
 
     def show_playlist_window(self):
         self.playlist_window.show()
@@ -1143,27 +1280,113 @@ class VideoPlayer(QMainWindow):
     def _play_playlist_item(self, item):
         index = self.playlist_widget.row(item)
         if 0 <= index < len(self.playlist_paths):
-            self.playlist_index = index
-            self.play_file(self.playlist_paths[index])
+            self._play_playlist_index(index)
 
     def play_previous_track(self):
-        if not self.playlist_paths:
-            return
-        index = self.playlist_index - 1 if self.playlist_index > 0 else 0
-        self._play_playlist_index(index)
+        self._navigate_track(-1)
 
     def play_next_track(self):
-        if not self.playlist_paths:
-            return
-        index = self.playlist_index + 1 if self.playlist_index >= 0 else 0
-        if index >= len(self.playlist_paths):
-            return
-        self._play_playlist_index(index)
+        self._navigate_track(1)
 
-    def _play_next_track(self):
-        if self.playlist_index < 0 or self.playlist_index + 1 >= len(self.playlist_paths):
+    def _navigate_track(self, step):
+        if not self.current_file:
             return
-        self._play_playlist_index(self.playlist_index + 1)
+
+        paths = (
+            self.playlist_paths
+            if self.playlist_index >= 0
+            else self._folder_video_paths()
+        )
+        current_path = self._normalized_media_path(self.current_file)
+        current_index = next(
+            (
+                index for index, path in enumerate(paths)
+                if self._normalized_media_path(path) == current_path
+            ),
+            -1,
+        )
+        next_index = current_index + step
+        if not 0 <= next_index < len(paths):
+            return
+
+        if paths is self.playlist_paths:
+            self._play_playlist_index(next_index)
+        else:
+            self.play_file(paths[next_index])
+
+    def _folder_video_paths(self):
+        if not self.current_file:
+            return []
+        folder = Path(self.current_file).parent
+        try:
+            return sorted(
+                (
+                    str(path.resolve())
+                    for path in folder.iterdir()
+                    if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+                ),
+                key=lambda path: (Path(path).name.casefold(), path.casefold()),
+            )
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Could not read video folder",
+                f"Could not list videos in:\n{folder}\n\n{exc}",
+            )
+            return []
+
+    def _handle_playback_end(self):
+        if not self.current_file:
+            return
+
+        self.playback_ended = True
+        self.pending_resume_position_ms = None
+        mode = self.playback_mode.currentData()
+        if mode == "repeat_one":
+            self.stop()
+            self.playback_ended = True
+            return
+
+        if mode == "random_folder":
+            paths = self._folder_video_paths()
+            current_path = self._normalized_media_path(self.current_file)
+            candidates = [
+                path for path in paths
+                if self._normalized_media_path(path) != current_path
+            ]
+            if not candidates:
+                candidates = paths
+            if candidates:
+                self.play_file(random.choice(candidates))
+            return
+
+        paths = (
+            self.playlist_paths
+            if self.playlist_index >= 0
+            else self._folder_video_paths()
+        )
+        current_path = self._normalized_media_path(self.current_file)
+        current_index = next(
+            (
+                index for index, path in enumerate(paths)
+                if self._normalized_media_path(path) == current_path
+            ),
+            -1,
+        )
+        if current_index < 0:
+            return
+
+        step = -1 if mode == "previous" else 1
+        next_index = current_index + step
+        if not 0 <= next_index < len(paths):
+            if mode != "repeat_all":
+                return
+            next_index = 0 if step > 0 else len(paths) - 1
+
+        if paths is self.playlist_paths:
+            self._play_playlist_index(next_index)
+        else:
+            self.play_file(paths[next_index])
 
     def _play_playlist_index(self, index):
         if not 0 <= index < len(self.playlist_paths):
@@ -1661,6 +1884,13 @@ class VideoPlayer(QMainWindow):
                 self.player.pause()
                 self._set_playback_button_text("Play")
             elif self.current_file:
+                if self.playback_ended:
+                    length = self.player.get_length()
+                    self.pending_resume_position_ms = (
+                        int(length * self.position_slider.value() / 1000)
+                        if length > 0
+                        else None
+                    )
                 # VLC state can take a moment to update after a previous play command.
                 self.player.play()
                 self._set_playback_button_text("Pause")
@@ -1672,6 +1902,8 @@ class VideoPlayer(QMainWindow):
     def stop(self):
         if self.player:
             self.player.stop()
+        self.playback_ended = False
+        self.pending_resume_position_ms = None
         self._set_playback_button_text("Play")
         self.position_slider.setValue(0)
         self.current_time.setText("00:00")
@@ -1684,10 +1916,32 @@ class VideoPlayer(QMainWindow):
         if length > 0 and current >= 0:
             self.player.set_time(max(0, min(length, current + milliseconds)))
 
+    def _seek_by_slider_step(self, direction):
+        value = max(
+            self.position_slider.minimum(),
+            min(
+                self.position_slider.maximum(),
+                self.position_slider.value()
+                + direction * self.position_slider.singleStep(),
+            ),
+        )
+        self.position_slider.setValue(value)
+        self._seek_to_position(value)
+
+    def _adjust_volume_by_step(self, direction):
+        self.volume_slider.setValue(
+            self.volume_slider.value()
+            + direction * self.volume_slider.singleStep()
+        )
+
     def set_volume(self, value):
+        self.volume_value_label.setText(f"{value}%")
         if self.player:
             self.player.audio_set_volume(int(value))
         self.mute_button.setText("Unmute" if value == 0 else "Mute")
+
+    def reset_volume(self):
+        self.volume_slider.setValue(80)
 
     def toggle_mute(self):
         if not self.player:
@@ -1735,15 +1989,23 @@ class VideoPlayer(QMainWindow):
         if self.player:
             length = self.player.get_length()
             if length > 0:
-                self.player.set_time(int(length * self.position_slider.value() / 1000))
+                position_ms = int(length * self.position_slider.value() / 1000)
+                self._seek_player_to(position_ms)
         self.is_seeking = False
 
     def _seek_to_position(self, value):
         if self.player:
             length = self.player.get_length()
             if length > 0:
-                self.current_time.setText(format_time(length * value / 1000))
-                self.player.set_time(int(length * value / 1000))
+                position_ms = int(length * value / 1000)
+                self.current_time.setText(format_time(position_ms))
+                self._seek_player_to(position_ms)
+
+    def _seek_player_to(self, position_ms):
+        if self.playback_ended:
+            self.pending_resume_position_ms = position_ms
+        else:
+            self.player.set_time(position_ms)
 
     def _seek_trim_timeline(self, position_ms):
         if not self.player:
@@ -1753,7 +2015,7 @@ class VideoPlayer(QMainWindow):
             return
 
         position_ms = max(0, min(length, position_ms))
-        self.player.set_time(position_ms)
+        self._seek_player_to(position_ms)
         self.is_seeking = False
         self.current_time.setText(format_time(position_ms))
         self.position_slider.blockSignals(True)
@@ -1766,11 +2028,20 @@ class VideoPlayer(QMainWindow):
             return
         try:
             length = self.player.get_length()
+            if (
+                self.pending_resume_position_ms is not None
+                and self.player.is_playing()
+            ):
+                self.player.set_time(self.pending_resume_position_ms)
+                self.pending_resume_position_ms = None
+                self.playback_ended = False
             current = self.player.get_time()
             self._update_trim_visuals(current, length)
             if length > 0:
                 self.total_time.setText(format_time(length))
-                if not self.is_seeking:
+                if not self.is_seeking and not (
+                    self.playback_ended and not self.player.is_playing()
+                ):
                     self.current_time.setText(format_time(current))
                     self.position_slider.blockSignals(True)
                     self.position_slider.setValue(max(0, min(1000, int(current * 1000 / length))))
@@ -1804,6 +2075,27 @@ def main():
         None,
     )
     app = QApplication(sys.argv)
+    app.setOrganizationName("PythonVideoPlayer")
+    app.setApplicationName("Python Video Player")
+    server_name = "PythonVideoStudioSingleInstance"
+    startup_file = os.path.abspath(startup_file) if startup_file else None
+    if forward_open_request(server_name, startup_file):
+        return
+
+    instance_server = SingleInstanceServer(server_name)
+    if not instance_server.listen():
+        if forward_open_request(server_name, startup_file):
+            return
+        QLocalServer.removeServer(server_name)
+        if (
+            not instance_server.listen()
+            and not forward_open_request(server_name, startup_file)
+        ):
+            raise RuntimeError(
+                f"Could not listen for media open requests: "
+                f"{instance_server.server.errorString()}"
+            )
+
     icon_path = Path(__file__).with_name("Video Studio Icon.ico")
     if not icon_path.is_file():
         icon_path = Path(sys.executable).resolve().with_name(
@@ -1815,12 +2107,14 @@ def main():
             "Video Studio.exe."
         )
     app.setWindowIcon(QIcon(str(icon_path)))
-    app.setOrganizationName("PythonVideoPlayer")
-    app.setApplicationName("Python Video Player")
     window = VideoPlayer()
+    instance_server.request_received.connect(window.open_external_file)
+    instance_server.request_error.connect(
+        lambda message: QMessageBox.warning(window, "Open request failed", message)
+    )
     window.show()
     if startup_file:
-        QTimer.singleShot(0, lambda: window.play_file(os.path.abspath(startup_file)))
+        QTimer.singleShot(0, lambda: window.play_file(startup_file))
     sys.exit(app.exec())
 
 
