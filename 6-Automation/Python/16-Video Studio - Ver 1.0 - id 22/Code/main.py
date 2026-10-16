@@ -44,7 +44,8 @@ PLAYBACK_MODES = {
     "Play next": "next",
     "Play previous": "previous",
     "Play once": "repeat_one",
-    "Repeat once": "repeat_once",
+    "Repeat": "repeat_current",
+    "Repeat all once": "repeat_once",
     "Repeat all": "repeat_all",
     "Random in folder": "random_folder",
 }
@@ -1635,6 +1636,14 @@ class VideoPlayer(QMainWindow):
         self.playback_ended = True
         self.pending_resume_position_ms = None
         mode = self.playback_mode.currentData()
+        if mode == "repeat_current":
+            self.player.stop()
+            self.player.set_time(0)
+            self.player.play()
+            self.playback_ended = False
+            self.pending_resume_position_ms = None
+            return
+
         if mode == "repeat_one":
             self.stop()
             self.playback_ended = True
