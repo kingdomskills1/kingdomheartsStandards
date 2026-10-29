@@ -29,8 +29,10 @@ at the matching heading level, including when written as `### 4.1. Example`;
 the numbering is omitted from the displayed heading.
 Bare variable symbols and simple formulas in Markdown table cells are formatted
 as Word equations. LaTeX expressions in table cells, including inline,
-display-style, and dollar-delimited forms, are converted to Word equations and
-left-aligned. Internal ChatGPT layout tags such as `<box>`, `<row>`, and
+display-style, and dollar-delimited forms, are converted to Word equations.
+Equations mixed with descriptive text in table cells remain inline, with the
+description kept as regular text. Standalone table equations are left-aligned.
+Internal ChatGPT layout tags such as `<box>`, `<row>`, and
 `<divider>` are omitted from exported text.
 ChatGPT's embedded images, including image groups,
 are downloaded and placed at their positions in the answer; citation markers

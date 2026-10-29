@@ -1190,19 +1190,74 @@ def _strip_redundant_table_symbol_parentheses(expression):
     return match.group(1) if match else expression
 
 
+def _table_math_description_parts(expression):
+    value = expression.strip()
+    formula = ""
+    description = ""
+    if value.startswith("("):
+        depth = 0
+        closing_index = None
+        for index, character in enumerate(value):
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0:
+                    closing_index = index
+                    break
+        if closing_index is not None:
+            formula = value[1:closing_index].strip()
+            description = value[closing_index + 1 :].strip()
+    if not description:
+        suffix = re.search(
+            r"\s*(?P<description>for\s*a\s*right\s*circular\s*cone)\s*$",
+            value,
+            re.IGNORECASE,
+        )
+        if suffix:
+            formula = value[:suffix.start()].strip().strip("() ")
+            description = suffix.group("description").strip()
+    if not formula or not description or not re.search(
+        r"\\[A-Za-z]+|[=^_*/+<>≤≥π]",
+        formula,
+    ):
+        return None
+    return formula, description
+
+
+def _has_table_math_with_description(text):
+    for match in re.finditer(
+        r"\\\((.+?)\\\)|\$(.+?)\$",
+        text,
+    ):
+        expression = match.group(1) or match.group(2)
+        if _table_math_description_parts(expression):
+            return True
+    return False
+
+
+def _has_table_math_with_surrounding_text(text):
+    for match in re.finditer(r"\\\(.+?\\\)|\\\[.+?\\\]|\$.+?\$", text):
+        if text[:match.start()].strip() or text[match.end():].strip():
+            return True
+    return False
+
+
 def _add_table_math_with_description(paragraph, expression):
-    match = re.fullmatch(
-        r"(?P<formula>.+?)\s*"
-        r"for\s*a\s*right\s*circular\s*cone",
-        expression.strip(),
-        re.IGNORECASE,
-    )
-    if not match:
+    parts = _table_math_description_parts(expression)
+    if not parts:
         return False
-    formula = match.group("formula").strip().strip("() ")
+    formula, description = parts
     formula = re.sub(r"\\ell\b", "l", formula)
     _add_math(paragraph, formula)
-    paragraph.add_run(" for a right circular cone")
+    if re.fullmatch(r"forarightcircularcone", description, re.IGNORECASE):
+        description = "for a right circular cone"
+    separator = (
+        ""
+        if paragraph.runs and paragraph.runs[-1].text.endswith((" ", "\t"))
+        else " "
+    )
+    paragraph.add_run(f"{separator}{_clean_inline_text(description)}")
     return True
 
 
@@ -1231,12 +1286,12 @@ def _add_table_math_with_units(paragraph, expression):
 
 
 def _add_labeled_table_math(paragraph, expression, table_cell_label):
-    if table_cell_label is None:
-        return False
-    label = table_cell_label.strip().casefold()
-    if label == "lateral area":
-        return _add_table_math_with_description(paragraph, expression)
-    if label == "measurement units":
+    if _add_table_math_with_description(paragraph, expression):
+        return True
+    if (
+        table_cell_label is not None
+        and table_cell_label.strip().casefold() == "measurement units"
+    ):
         return _add_table_math_with_units(paragraph, expression)
     return False
 
@@ -1245,9 +1300,15 @@ def _add_inline_runs(paragraph, text, table_math=False, table_cell_label=None):
     text = text.strip()
     inline_table_math = (
         table_math
-        and table_cell_label is not None
-        and table_cell_label.strip().casefold()
-        in {"lateral area", "measurement units"}
+        and (
+            _has_table_math_with_description(text)
+            or _has_table_math_with_surrounding_text(text)
+            or (
+                table_cell_label is not None
+                and table_cell_label.strip().casefold()
+                in {"lateral area", "measurement units"}
+            )
+        )
     )
     token_pattern = re.compile(
         r"(\\\(.+?\\\)|\\\[.+?\\\]|\$.+?\$|\*\*.+?\*\*|__.+?__|"
@@ -1269,10 +1330,7 @@ def _add_inline_runs(paragraph, text, table_math=False, table_cell_label=None):
                 expression,
                 table_cell_label,
             ):
-                if (
-                    table_cell_label is not None
-                    and table_cell_label.strip().casefold() == "lateral area"
-                ):
+                if table_math and inline_table_math:
                     expression = re.sub(r"\\ell\b", "l", expression)
                 _add_math(
                     paragraph,
@@ -1293,10 +1351,7 @@ def _add_inline_runs(paragraph, text, table_math=False, table_cell_label=None):
                 expression,
                 table_cell_label,
             ):
-                if (
-                    table_cell_label is not None
-                    and table_cell_label.strip().casefold() == "lateral area"
-                ):
+                if table_math and inline_table_math:
                     expression = re.sub(r"\\ell\b", "l", expression)
                 _add_math(
                     paragraph,
@@ -1500,6 +1555,10 @@ def _add_response_text(document, text, images=(), heading_content=()):
                                 row_index > 0
                                 and _is_bare_math_table_cell(value)
                                 and not inline_math_cell
+                                and not _has_table_math_with_description(value)
+                                and not _has_table_math_with_surrounding_text(
+                                    value
+                                )
                             ):
                                 value = (
                                     _strip_redundant_table_symbol_parentheses(
