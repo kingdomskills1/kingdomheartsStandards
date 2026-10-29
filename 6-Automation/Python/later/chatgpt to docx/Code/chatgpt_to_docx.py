@@ -1296,7 +1296,14 @@ def _add_labeled_table_math(paragraph, expression, table_cell_label):
     return False
 
 
-def _add_inline_runs(paragraph, text, table_math=False, table_cell_label=None):
+def _add_inline_runs(
+    paragraph,
+    text,
+    table_math=False,
+    table_cell_label=None,
+    bold=False,
+    italic=False,
+):
     text = text.strip()
     inline_table_math = (
         table_math
@@ -1317,7 +1324,9 @@ def _add_inline_runs(paragraph, text, table_math=False, table_cell_label=None):
     position = 0
     for match in token_pattern.finditer(text):
         if match.start() > position:
-            paragraph.add_run(_clean_inline_text(text[position:match.start()]))
+            run = paragraph.add_run(_clean_inline_text(text[position:match.start()]))
+            run.bold = bold
+            run.italic = italic
         token = match.group()
         if token.startswith((r"\(", r"\[")):
             expression = token[2:-2]
@@ -1362,18 +1371,29 @@ def _add_inline_runs(paragraph, text, table_math=False, table_cell_label=None):
                     ),
                 )
         elif token.startswith(("**", "__")):
-            run = paragraph.add_run(_clean_inline_text(token[2:-2]))
-            run.bold = True
+            _add_inline_runs(
+                paragraph,
+                token[2:-2],
+                table_math=table_math,
+                table_cell_label=table_cell_label,
+                bold=True,
+                italic=italic,
+            )
         elif token.startswith(("`",)):
             run = paragraph.add_run(token[1:-1])
             run.font.name = "Consolas"
             run.font.size = Pt(9)
+            run.bold = bold
+            run.italic = italic
         else:
             run = paragraph.add_run(token[1:-1])
             run.italic = True
+            run.bold = bold
         position = match.end()
     if position < len(text):
-        paragraph.add_run(_clean_inline_text(text[position:]))
+        run = paragraph.add_run(_clean_inline_text(text[position:]))
+        run.bold = bold
+        run.italic = italic
     while paragraph.runs and paragraph._p[-1] is paragraph.runs[-1]._r:
         run = paragraph.runs[-1]
         trimmed = run.text.rstrip()
