@@ -927,6 +927,14 @@ class _MathParser:
             return container
         return self._atom()
 
+    def _fraction_argument(self):
+        if self.position < len(self.tokens):
+            token = self.tokens[self.position]
+            if re.fullmatch(r"\d{2,}", token):
+                self.tokens[self.position] = token[1:]
+                return _math_run(token[0])
+        return self._group()
+
     def _atom(self):
         if self.position >= len(self.tokens):
             return _math_run("")
@@ -952,8 +960,8 @@ class _MathParser:
                     return _math_run(delimiter)
                 return _math_run("")
             if command == "frac":
-                numerator = self._group()
-                denominator = self._group()
+                numerator = self._fraction_argument()
+                denominator = self._fraction_argument()
                 fraction = _math_element("f")
                 fraction.append(_math_element("fPr"))
                 for tag, value in (("num", numerator), ("den", denominator)):
@@ -1125,16 +1133,23 @@ def _add_pasted_text(document, paragraphs):
 
 def _numbered_section_heading(text):
     stripped = re.sub(r"^#{1,6}\s+", "", text.strip())
-    return re.fullmatch(
-        r"(?:\*\*)?(\d+(?:\.\d+)+\.?)\s+(.+?)(?:\*\*)?",
+    match = re.fullmatch(
+        r"(?:\*\*)?(\d+(?:\.\d+)*\.?)\s+(.+?)(?:\*\*)?",
         stripped,
     )
+    if (
+        match
+        and "." not in match.group(1).rstrip(".")
+        and not (stripped.startswith("**") and stripped.endswith("**"))
+    ):
+        return None
+    return match
 
 
 def _numbered_heading_level(section_heading):
     if section_heading is None:
         return None
-    return len(section_heading.group(1).rstrip(".").split(".")) + 1
+    return max(3, len(section_heading.group(1).rstrip(".").split(".")) + 1)
 
 
 def _heading_level(line):
