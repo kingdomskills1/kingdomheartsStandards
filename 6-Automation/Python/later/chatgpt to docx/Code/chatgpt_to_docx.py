@@ -870,6 +870,7 @@ class _MathParser:
         "delta": "δ",
         "theta": "θ",
         "lambda": "λ",
+        "ell": "ℓ",
         "mu": "μ",
         "pi": "π",
         "rho": "ρ",
