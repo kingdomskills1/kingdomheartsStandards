@@ -1,6 +1,6 @@
+import tkinter as tk
 import tkinter.font as tkFont
 import win32com.client
-from utils.inspect_word_selection import inspect_word_selection
 
 # Word highlight index → name
 HIGHLIGHT_MAP = {
@@ -21,13 +21,76 @@ WORD_TO_COLOR = {
     "Gray50": "#808080", "Gray25": "#C0C0C0"
 }
 
-def paste_word_selection_into_text(text_widget):
+
+def _paste_clipboard_into_word_range():
+    word = win32com.client.DispatchEx("Word.Application")
+    document = None
     try:
-        inspect_word_selection()
+        word.Visible = False
+        word.DisplayAlerts = 0
+        document = word.Documents.Add()
+        document.Content.Paste()
+        rng = document.Content
 
+        # Exclude Word's required final paragraph mark, not a copied paragraph mark.
+        if rng.Text.endswith("\r"):
+            rng.MoveEnd(Unit=1, Count=-1)
+        if not rng.Text:
+            raise ValueError("The clipboard does not contain pasteable Word content.")
+        return word, document, rng
+    except Exception:
+        if document is not None:
+            try:
+                document.Close(SaveChanges=0)
+            except Exception as e:
+                print(f"Error closing temporary Word document: {e}")
+        try:
+            word.Quit()
+        except Exception as e:
+            print(f"Error closing temporary Word instance: {e}")
+        raise
+
+
+def paste_word_selection_into_text(text_widget, progress_callback=None):
+    def report_progress(percent, message):
+        if progress_callback is not None:
+            progress_callback(percent, message)
+
+    report_progress(0, "Starting paste")
+    rng = None
+    temporary_word = None
+    temporary_document = None
+    try:
+        report_progress(5, "Checking Word selection")
         word = win32com.client.GetActiveObject("Word.Application")
-        rng = word.Selection.Range
+        selection = word.Selection
+        if selection is not None:
+            selected_range = selection.Range
+            if selected_range.Text:
+                rng = selected_range
+    except Exception as e:
+        print(f"Error reading active Word selection: {e}")
 
+    if rng is None:
+        try:
+            report_progress(10, "Reading formatted clipboard")
+            temporary_word, temporary_document, rng = _paste_clipboard_into_word_range()
+        except Exception as e:
+            print(f"Error reading formatted Word clipboard: {e}")
+            try:
+                clipboard_text = text_widget.clipboard_get()
+            except tk.TclError as clipboard_error:
+                print(f"Error reading clipboard text: {clipboard_error}")
+                report_progress(100, "Paste failed")
+                return
+
+            text_widget.delete("1.0", "end")
+            text_widget.configure(background="white", foreground="black")
+            text_widget.insert("1.0", clipboard_text)
+            report_progress(100, "Paste complete")
+            return
+
+    try:
         # Clear previous content and reset defaults
         text_widget.delete("1.0", "end")
         text_widget.configure(background="white", foreground="black")
@@ -37,8 +100,11 @@ def paste_word_selection_into_text(text_widget):
 
         font_cache = {}
         highlight_cache = {}
+        character_count = rng.Characters.Count
+        last_reported_percent = 20
+        report_progress(20, "Applying formatting")
 
-        for i in range(1, rng.Characters.Count + 1):
+        for i in range(1, character_count + 1):
             char = rng.Characters(i)
             ch = char.Text
             is_paragraph = (ch == "\r")
@@ -151,5 +217,23 @@ def paste_word_selection_into_text(text_widget):
 
             text_widget.tag_add(tag, start, end)
 
+            percent = 20 + int(i * 75 / character_count) if character_count else 95
+            if percent > last_reported_percent:
+                report_progress(percent, "Applying formatting")
+                last_reported_percent = percent
+
+        report_progress(100, "Paste complete")
     except Exception as e:
         print(f"Error in paste_word_selection_into_text: {e}")
+        report_progress(100, "Paste failed")
+    finally:
+        if temporary_document is not None:
+            try:
+                temporary_document.Close(SaveChanges=0)
+            except Exception as e:
+                print(f"Error closing temporary Word document: {e}")
+        if temporary_word is not None:
+            try:
+                temporary_word.Quit()
+            except Exception as e:
+                print(f"Error closing temporary Word instance: {e}")

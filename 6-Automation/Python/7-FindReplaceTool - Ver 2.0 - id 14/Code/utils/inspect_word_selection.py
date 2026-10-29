@@ -1,6 +1,4 @@
 # utils/inspect_word_selection.py
-import win32com.client
-
 HIGHLIGHT_MAP = {
     0: "None", 1: "Black", 2: "Blue", 3: "Turquoise",
     4: "Bright Green", 5: "Pink", 6: "Red", 7: "Yellow", 8: "White",
@@ -8,15 +6,12 @@ HIGHLIGHT_MAP = {
     13: "Dark Red", 14: "Dark Yellow", 15: "Gray50", 16: "Gray25"
 }
 
-def inspect_word_selection():
+def inspect_word_selection(rng):
     """
     Inspects each character in the current Word selection
     and prints Font, Size, Style, Highlight to CMD.
     """
     try:
-        word = win32com.client.Dispatch("Word.Application")
-        rng = word.Selection.Range
-
         text_content = rng.Text.strip()
         if not text_content:
             print("No text selected in Word.")

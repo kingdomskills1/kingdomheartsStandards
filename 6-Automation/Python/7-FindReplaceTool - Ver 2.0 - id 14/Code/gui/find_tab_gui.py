@@ -48,6 +48,8 @@ class FindTabGUI:
         self.italic_var = tk.BooleanVar()
         self.font_color = tk.StringVar(value="black")
         self.highlight_color = tk.StringVar(value="yellow")
+        self.paste_progress_var = tk.StringVar(value="")
+        self.replace_progress_var = tk.StringVar(value="")
 
         # Content Type
         self.content_type_var = tk.StringVar(value="all")
@@ -142,7 +144,9 @@ class FindTabGUI:
         replace_buttons = tk.Frame(parent)
         replace_buttons.grid(row=15, column=0, columnspan=5, sticky="w", padx=10)
         tk.Button(replace_buttons, text="Apply Replace", command=self.replace_callback).pack(side="left")
+        tk.Label(replace_buttons, textvariable=self.replace_progress_var).pack(side="left", padx=5)
         tk.Button(replace_buttons, text="Paste", command=self.paste_callback).pack(side="left", padx=5)
+        tk.Label(replace_buttons, textvariable=self.paste_progress_var).pack(side="left", padx=5)
 
         # ---------------- 8. Insert ----------------
         tk.Label(parent, text="8. Insert Content (Applied to Found Matches)", font=("Arial", 12, "bold")).grid(

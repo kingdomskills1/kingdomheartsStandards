@@ -146,15 +146,14 @@ class FindTab:
         )
 
     def paste_text_to_replace(self):
-        # Show loading message
-        self.gui.replace_text.config(state="normal")
-        self.gui.replace_text.delete("1.0", "end")
-        self.gui.replace_text.insert("1.0", "Loading...")
-        self.gui.replace_text.update_idletasks()  # Refresh the UI  
-        """
-        Paste Word selection into Replace Text field with formatting
-        """
-        paste_word_selection_into_text(self.gui.replace_text)
+        replace_widget = self.gui.replace_text
+        replace_widget.config(state="normal")
+
+        def update_paste_progress(percent, message):
+            self.gui.paste_progress_var.set(f"{message}: {percent}%")
+            replace_widget.update_idletasks()
+
+        paste_word_selection_into_text(replace_widget, update_paste_progress)
 
     # -------------------- Apply Replace --------------------
     def apply_replace(self):
@@ -162,6 +161,10 @@ class FindTab:
         if find_text == "":
             messagebox.showwarning("Empty Find Field", "The Find field is empty.")
             return
+
+        def update_replace_progress(percent, message):
+            self.gui.replace_progress_var.set(f"{message}: {percent}%")
+            self.gui.replace_text.update_idletasks()
 
         run_replace_process(
             gui=self.gui,
@@ -175,7 +178,8 @@ class FindTab:
             txt=self.gui.txt_var.get(),
             doc=self.gui.doc_var.get(),
             pdf=self.gui.pdf_var.get(),
-            content_type=self.gui.content_type_var.get()
+            content_type=self.gui.content_type_var.get(),
+            progress_callback=update_replace_progress
         )
 
 

@@ -393,6 +393,15 @@ def process_tables(tables, handler):
                 if cell.tables:
                     process_tables(cell.tables, handler)
 
+def count_table_paragraphs(tables):
+    count = 0
+    for table in tables:
+        for row in table.rows:
+            for cell in row.cells:
+                count += len(cell.paragraphs)
+                count += count_table_paragraphs(cell.tables)
+    return count
+
 def replace_in_file_docx(path, tk_replace_widget, find_text,
                          case_sensitive=False, regex=False):
     """
@@ -420,9 +429,20 @@ def replace_in_file_docx(path, tk_replace_widget, find_text,
 
 # ----------------- Main Replace Process -----------------
 def run_replace_process(gui, path, is_file, find_text, tk_replace_widget,
-                        case_sensitive, regex, include_subfolders, txt, doc, pdf, content_type):
+                        case_sensitive, regex, include_subfolders, txt, doc, pdf, content_type,
+                        progress_callback=None):
 
     gui.text_results.config(state="normal")
+    last_progress = None
+
+    def report_progress(percent, message):
+        nonlocal last_progress
+        current_progress = (percent, message)
+        if current_progress == last_progress:
+            return
+        last_progress = current_progress
+        if progress_callback is not None:
+            progress_callback(percent, message)
     
     # Ensure text_results is cleared at the beginning (optional based on your flow)
     # gui.text_results.delete("1.0", "end")  # You might not want to clear, depending on your need
@@ -432,11 +452,17 @@ def run_replace_process(gui, path, is_file, find_text, tk_replace_widget,
 
     files = get_files_to_process(path, is_file, include_subfolders, txt, doc, pdf)
     gui.text_results.insert("end", f"Processing {len(files)} file(s)...\n\n")
+    report_progress(0, f"Starting replacement ({len(files)} file(s))")
 
     replace_plain_text = extract_plain_text(tk_replace_widget)  # Extract replacement text
 
-    for file_path in files:
+    for file_index, file_path in enumerate(files):
         file_replacements = 0
+        file_progress = 0.0
+        report_progress(
+            int(file_index * 100 / len(files)) if files else 100,
+            f"Processing file {file_index + 1} of {len(files)}"
+        )
 
         try:
             # ---------- TXT ---------- 
@@ -469,6 +495,26 @@ def run_replace_process(gui, path, is_file, find_text, tk_replace_widget,
                 # Extract replacement text
                 replace_plain_text = extract_plain_text(tk_replace_widget)
                 apply_heading_format = gui.apply_heading_format_var.get()
+                table_content_types = ("tables", "tables_headings", "all")
+                table_paragraphs = (
+                    count_table_paragraphs(docx.tables)
+                    if content_type in table_content_types else 0
+                )
+                total_paragraphs = len(docx.paragraphs) + table_paragraphs
+                completed_paragraphs = 0
+
+                def report_docx_progress():
+                    nonlocal completed_paragraphs, file_progress
+                    completed_paragraphs += 1
+                    if total_paragraphs:
+                        file_progress = completed_paragraphs / total_paragraphs
+                        overall_percent = int(
+                            (file_index + file_progress) * 100 / len(files)
+                        )
+                        report_progress(
+                            min(overall_percent, 99),
+                            f"Processing file {file_index + 1} of {len(files)}"
+                        )
 
                 # --- Process each paragraph ---
                 for para in docx.paragraphs:
@@ -488,9 +534,10 @@ def run_replace_process(gui, path, is_file, find_text, tk_replace_widget,
                         # Non-heading text
                         if content_type in ("all", "text"):
                             file_replacements += replace_paragraph_safe_inplace(para, pattern, char_formats)
+                    report_docx_progress()
 
                 # --- Process tables ---
-                if content_type in ("tables", "tables_headings", "all"):
+                if content_type in table_content_types:
                     def table_handler(p):
                         nonlocal file_replacements
                         is_heading = p.style and p.style.name.startswith("Heading")
@@ -503,6 +550,7 @@ def run_replace_process(gui, path, is_file, find_text, tk_replace_widget,
                                 file_replacements += replace_paragraph_safe_inplace(p, pattern, char_formats)
                         else:
                             file_replacements += replace_paragraph_safe_inplace(p, pattern, char_formats)
+                        report_docx_progress()
                     process_tables(docx.tables, table_handler)
 
                 docx.save(file_path)
@@ -525,6 +573,13 @@ def run_replace_process(gui, path, is_file, find_text, tk_replace_widget,
         except Exception as e:
             gui.text_results.insert("end", f"Error in {file_path}: {e}\n")
 
+        file_progress = 1.0
+        overall_percent = int((file_index + 1) * 100 / len(files)) if files else 100
+        report_progress(
+            overall_percent,
+            f"Finished file {file_index + 1} of {len(files)}"
+        )
+
     # ---------- SUMMARY ----------
     gui.text_results.insert(
         "end",
@@ -535,3 +590,4 @@ def run_replace_process(gui, path, is_file, find_text, tk_replace_widget,
 
     gui.text_results.config(state="disabled")
     gui.text_results.see("1.0")  # Scroll to top after completing
+    report_progress(100, "Replace complete")
