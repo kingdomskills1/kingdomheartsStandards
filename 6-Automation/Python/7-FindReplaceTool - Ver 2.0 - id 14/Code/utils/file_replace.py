@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 from docx import Document
@@ -297,8 +298,19 @@ def replace_paragraph_safe_inplace(para, pattern, char_formats):
 
     # Build mapping: run -> paragraph text positions
     runs = []
+    drawing_runs = []
     pos = 0
     for run in para.runs:
+        drawings = run._element.xpath(".//w:drawing | .//w:pict")
+        if drawings:
+            preserved_run = OxmlElement("w:r")
+            run_properties = run._element.find(qn("w:rPr"))
+            if run_properties is not None:
+                preserved_run.append(copy.deepcopy(run_properties))
+            for drawing in drawings:
+                preserved_run.append(copy.deepcopy(drawing))
+            drawing_runs.append(preserved_run)
+
         runs.append({
             "run": run,
             "start": pos,
@@ -380,6 +392,9 @@ def replace_paragraph_safe_inplace(para, pattern, char_formats):
                         set_run_shading(r, fmt["highlight_hex"])
             elif fmt.get("highlight_hex"):
                 set_run_shading(r, fmt["highlight_hex"])
+
+    for drawing_run in drawing_runs:
+        para._p.append(drawing_run)
 
     return len(matches)
 
