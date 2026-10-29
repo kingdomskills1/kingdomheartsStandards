@@ -1237,6 +1237,8 @@ def _is_bare_math_table_cell(text):
     value = text.strip()
     if not value:
         return False
+    if re.search(r"(?:\*\*.+?\*\*|__.+__)", value):
+        return False
     if re.fullmatch(r"(?:\\\(.+?\\\)|\\\[.+?\\\]|\$.+?\$)", value):
         return False
     if re.fullmatch(r"(?:[A-Za-z](?:_\{?[A-Za-z0-9]+\}?)?|\d+[A-Za-z])", value):
@@ -1384,6 +1386,11 @@ def _add_response_text(document, text, images=(), heading_content=()):
                         for column_index, value in enumerate(cells):
                             if row_index == 1 and re.match(r"^\s*:?-+:?\s*$", value):
                                 continue
+                            value = re.sub(
+                                r"^\*\*Basediameter\*\*\(\(([A-Za-z])\)\)$",
+                                r"**Base diameter** (\\(\1\\))",
+                                value,
+                            )
                             cell = table.cell(row_index, column_index)
                             paragraph = cell.paragraphs[0]
                             if row_index > 0 and _is_bare_math_table_cell(value):
