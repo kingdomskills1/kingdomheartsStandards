@@ -1190,8 +1190,65 @@ def _strip_redundant_table_symbol_parentheses(expression):
     return match.group(1) if match else expression
 
 
-def _add_inline_runs(paragraph, text, table_math=False):
+def _add_table_math_with_description(paragraph, expression):
+    match = re.fullmatch(
+        r"(?P<formula>.+?)\s*"
+        r"for\s*a\s*right\s*circular\s*cone",
+        expression.strip(),
+        re.IGNORECASE,
+    )
+    if not match:
+        return False
+    formula = match.group("formula").strip().strip("() ")
+    formula = re.sub(r"\\ell\b", "l", formula)
+    _add_math(paragraph, formula)
+    paragraph.add_run(" for a right circular cone")
+    return True
+
+
+def _add_table_math_with_units(paragraph, expression):
+    value = expression.strip()
+    if value.startswith("(") and value.endswith(")"):
+        value = value[1:-1].strip()
+    match = re.fullmatch(
+        r"Square\s*units\s*,?\s*such\s*as\s*"
+        r"\(?\s*(?P<unit>[A-Za-z]+\s*(?:\^\s*\{?\d+\}?|\d+))\s*\)?",
+        value,
+        re.IGNORECASE,
+    )
+    if not match:
+        return False
+    unit = re.fullmatch(
+        r"(?P<base>[A-Za-z]+)\s*(?:\^\s*\{?(?P<caret>\d+)\}?|(?P<compact>\d+))",
+        match.group("unit"),
+    )
+    if not unit:
+        return False
+    exponent = unit.group("caret") or unit.group("compact")
+    paragraph.add_run("Square units, such as ")
+    _add_math(paragraph, f"{unit.group('base')}^{exponent}")
+    return True
+
+
+def _add_labeled_table_math(paragraph, expression, table_cell_label):
+    if table_cell_label is None:
+        return False
+    label = table_cell_label.strip().casefold()
+    if label == "lateral area":
+        return _add_table_math_with_description(paragraph, expression)
+    if label == "measurement units":
+        return _add_table_math_with_units(paragraph, expression)
+    return False
+
+
+def _add_inline_runs(paragraph, text, table_math=False, table_cell_label=None):
     text = text.strip()
+    inline_table_math = (
+        table_math
+        and table_cell_label is not None
+        and table_cell_label.strip().casefold()
+        in {"lateral area", "measurement units"}
+    )
     token_pattern = re.compile(
         r"(\\\(.+?\\\)|\\\[.+?\\\]|\$.+?\$|\*\*.+?\*\*|__.+?__|"
         r"(?<!\*)\*[^*]+\*(?!\*)|(?<!_)_[^_]+_(?!_)|`[^`]+`)"
@@ -1207,24 +1264,48 @@ def _add_inline_runs(paragraph, text, table_math=False):
                 expression = _strip_redundant_table_symbol_parentheses(
                     expression
                 )
-            _add_math(
+            if not _add_labeled_table_math(
                 paragraph,
                 expression,
-                display=table_math,
-                alignment="left" if table_math else None,
-            )
+                table_cell_label,
+            ):
+                if (
+                    table_cell_label is not None
+                    and table_cell_label.strip().casefold() == "lateral area"
+                ):
+                    expression = re.sub(r"\\ell\b", "l", expression)
+                _add_math(
+                    paragraph,
+                    expression,
+                    display=table_math and not inline_table_math,
+                    alignment=(
+                        "left" if table_math and not inline_table_math else None
+                    ),
+                )
         elif token.startswith("$"):
             expression = token[1:-1]
             if table_math:
                 expression = _strip_redundant_table_symbol_parentheses(
                     expression
                 )
-            _add_math(
+            if not _add_labeled_table_math(
                 paragraph,
                 expression,
-                display=table_math,
-                alignment="left" if table_math else None,
-            )
+                table_cell_label,
+            ):
+                if (
+                    table_cell_label is not None
+                    and table_cell_label.strip().casefold() == "lateral area"
+                ):
+                    expression = re.sub(r"\\ell\b", "l", expression)
+                _add_math(
+                    paragraph,
+                    expression,
+                    display=table_math and not inline_table_math,
+                    alignment=(
+                        "left" if table_math and not inline_table_math else None
+                    ),
+                )
         elif token.startswith(("**", "__")):
             run = paragraph.add_run(_clean_inline_text(token[2:-2]))
             run.bold = True
@@ -1409,7 +1490,17 @@ def _add_response_text(document, text, images=(), heading_content=()):
                             )
                             cell = table.cell(row_index, column_index)
                             paragraph = cell.paragraphs[0]
-                            if row_index > 0 and _is_bare_math_table_cell(value):
+                            table_cell_label = cells[0] if cells else None
+                            inline_math_cell = (
+                                table_cell_label is not None
+                                and table_cell_label.strip().casefold()
+                                in {"lateral area", "measurement units"}
+                            )
+                            if (
+                                row_index > 0
+                                and _is_bare_math_table_cell(value)
+                                and not inline_math_cell
+                            ):
                                 value = (
                                     _strip_redundant_table_symbol_parentheses(
                                         value
@@ -1426,6 +1517,7 @@ def _add_response_text(document, text, images=(), heading_content=()):
                                     paragraph,
                                     value,
                                     table_math=True,
+                                    table_cell_label=table_cell_label,
                                 )
                             if row_index == 0:
                                 for run in paragraph.runs:
