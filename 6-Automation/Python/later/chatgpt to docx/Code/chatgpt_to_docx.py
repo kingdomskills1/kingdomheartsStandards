@@ -837,8 +837,24 @@ def _math_element(tag):
     return OxmlElement(f"m:{tag}")
 
 
+def _math_rpr():
+    rpr = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    fonts.set(qn("w:ascii"), "Cambria Math")
+    fonts.set(qn("w:hAnsi"), "Cambria Math")
+    rpr.append(fonts)
+    return rpr
+
+
+def _math_ctrl_pr():
+    control = _math_element("ctrlPr")
+    control.append(_math_rpr())
+    return control
+
+
 def _math_run(text):
     run = _math_element("r")
+    run.append(_math_rpr())
     text_element = _math_element("t")
     text_element.set(
         "{http://www.w3.org/XML/1998/namespace}space",
@@ -860,6 +876,26 @@ def _append_script_content(container, argument):
             _append_script_content(container, child)
     else:
         container.append(argument)
+
+
+def _merge_nary_bodies(nodes):
+    merged = []
+    index = 0
+    while index < len(nodes):
+        node = nodes[index]
+        merged.append(node)
+        if (
+            node.tag.endswith("}nary")
+            and node.find("{http://schemas.openxmlformats.org/officeDocument/2006/math}e") is None
+            and index + 1 < len(nodes)
+        ):
+            body = _math_element("e")
+            _append_script_content(body, nodes[index + 1])
+            node.append(body)
+            index += 2
+            continue
+        index += 1
+    return merged
 
 
 class _MathParser:
@@ -949,7 +985,7 @@ class _MathParser:
     def _group(self, preserve_whitespace=False):
         if self.position < len(self.tokens) and self.tokens[self.position] == "{":
             self.position += 1
-            nodes = self._sequence("}", preserve_whitespace)
+            nodes = _merge_nary_bodies(self._sequence("}", preserve_whitespace))
             if self.position < len(self.tokens):
                 self.position += 1
             container = _math_element("e")
@@ -1022,7 +1058,7 @@ class _MathParser:
                 content = self._group()
                 border_box = _math_element("borderBox")
                 properties = _math_element("borderBoxPr")
-                properties.append(_math_element("ctrlPr"))
+                properties.append(_math_ctrl_pr())
                 border_box.append(properties)
                 expression = _math_element("e")
                 _append_script_content(expression, content)
@@ -1049,6 +1085,24 @@ class _MathParser:
                 return content
             if command in {"text", "mathrm"}:
                 return self._group(preserve_whitespace=command == "text")
+            if command in {"sum", "prod", "int"}:
+                nary = _math_element("nary")
+                properties = _math_element("naryPr")
+                symbol = _math_element("chr")
+                symbol.set(
+                    "{http://schemas.openxmlformats.org/officeDocument/2006/math}val",
+                    self.COMMANDS[command],
+                )
+                properties.append(symbol)
+                limit_location = _math_element("limLoc")
+                limit_location.set(
+                    "{http://schemas.openxmlformats.org/officeDocument/2006/math}val",
+                    "undOvr",
+                )
+                properties.append(limit_location)
+                properties.append(_math_ctrl_pr())
+                nary.append(properties)
+                return nary
             if command in self.COMMANDS:
                 return _math_run(self.COMMANDS[command])
             return _math_run(command)
@@ -1067,6 +1121,12 @@ class _MathParser:
                 self.position += 1
                 script = self._group()
                 base = nodes.pop()
+                if base.tag.endswith("}nary"):
+                    part = _math_element("sub" if token == "_" else "sup")
+                    _append_script_content(part, script)
+                    base.append(part)
+                    nodes.append(base)
+                    continue
                 has_sub = base.tag.endswith(("}sSub", "}sSubSup"))
                 has_sup = base.tag.endswith(("}sSup", "}sSubSup"))
                 if has_sub or has_sup:
@@ -1087,7 +1147,13 @@ class _MathParser:
                         script_tag = "sSup" if token == "^" else "sSub"
                     script_node = _math_element(script_tag)
                     if script_node.tag.endswith("sSubSup"):
-                        script_node.append(_math_element("sSubSupPr"))
+                        properties = _math_element("sSubSupPr")
+                        properties.append(_math_ctrl_pr())
+                        script_node.append(properties)
+                    else:
+                        properties = _math_element("sSupPr" if token == "^" else "sSubPr")
+                        properties.append(_math_ctrl_pr())
+                        script_node.append(properties)
                     script_node.append(old_expression)
                     sub = script if token == "_" else old_sub
                     sup = script if token == "^" else old_sup
@@ -1102,7 +1168,9 @@ class _MathParser:
                     base = script_node
                 else:
                     script_node = _math_element("sSup" if token == "^" else "sSub")
-                    script_node.append(_math_element("sSupPr" if token == "^" else "sSubPr"))
+                    properties = _math_element("sSupPr" if token == "^" else "sSubPr")
+                    properties.append(_math_ctrl_pr())
+                    script_node.append(properties)
                     expression = _math_element("e")
                     _append_script_content(expression, base)
                     script_node.append(expression)
@@ -1117,7 +1185,8 @@ class _MathParser:
 
     def parse(self):
         expression = _math_element("oMath")
-        for node in self._sequence():
+        nodes = _merge_nary_bodies(self._sequence())
+        for node in nodes:
             expression.append(node)
         return expression
 
