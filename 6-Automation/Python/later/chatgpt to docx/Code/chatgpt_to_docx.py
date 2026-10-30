@@ -867,16 +867,24 @@ class _MathParser:
         "alpha": "α",
         "beta": "β",
         "gamma": "γ",
+        "Gamma": "Γ",
         "delta": "δ",
+        "Delta": "Δ",
         "theta": "θ",
+        "Theta": "Θ",
         "lambda": "λ",
+        "Lambda": "Λ",
         "ell": "ℓ",
         "mu": "μ",
         "pi": "π",
+        "Pi": "Π",
         "rho": "ρ",
         "sigma": "σ",
+        "Sigma": "Σ",
         "phi": "φ",
+        "Phi": "Φ",
         "omega": "ω",
+        "Omega": "Ω",
         "cdot": "·",
         "times": "×",
         "pm": "±",
@@ -928,6 +936,8 @@ class _MathParser:
         return self._atom()
 
     def _fraction_argument(self):
+        while self.position < len(self.tokens) and self.tokens[self.position].isspace():
+            self.position += 1
         if self.position < len(self.tokens):
             token = self.tokens[self.position]
             if re.fullmatch(r"\d{2,}", token):
