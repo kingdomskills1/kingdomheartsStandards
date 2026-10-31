@@ -24,6 +24,10 @@ so links that require access or that no longer exist cannot be converted.
 The Word document contains the answer without an added title or source line;
 formatting, visible link text, lists, Markdown tables, and inline/display
 equations, including boxed formulas and degree-circle notation, are preserved.
+When a visible table is present in the ChatGPT share page, the app captures the
+actual rendered table image from that page and inserts it immediately before the
+Word table block. A generated PNG remains only as a fallback when a live page table
+is not available.
 Numbered subsection titles such as `4.1. Example` are recognized and formatted
 at the matching heading level, including when written as `### 4.1. Example`;
 the numbering is omitted from the displayed heading.
@@ -51,3 +55,8 @@ the latest reply is fetched and converted.
 If no save location is entered, the document is saved to the
 Desktop using the main heading as its filename, or `chatgpt-response.docx`
 when no main heading is present.
+
+For table screenshots from a live webpage, paste a page URL into the new
+"Page URL to capture a table screenshot from" field and click "Take screenshot".
+The app opens the page in Chrome headlessly, finds the first `<table>`, and saves
+a PNG image of that table for reuse.

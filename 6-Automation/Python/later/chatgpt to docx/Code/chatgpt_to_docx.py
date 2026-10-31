@@ -1,7 +1,9 @@
 import ctypes
 import io
 import json
+import os
 import re
+import tempfile
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -21,6 +23,24 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from lxml import etree
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # pragma: no cover - optional enhancement
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+except ImportError:  # pragma: no cover - optional browser helper
+    webdriver = None
+    Options = None
+    By = None
+    WebDriverWait = None
 
 
 USER_AGENT = (
@@ -1530,7 +1550,182 @@ def _is_bare_math_table_cell(text):
     )
 
 
-def _add_response_text(document, text, images=(), heading_content=()):
+def _default_table_font(size):
+    if ImageFont is None:
+        return None
+    candidate_paths = (
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\calibri.ttf",
+        r"C:\Windows\Fonts\consola.ttf",
+        r"C:\Windows\Fonts\cour.ttf",
+        r"C:\Windows\Fonts\verdana.ttf",
+    )
+    for candidate in candidate_paths:
+        if os.path.exists(candidate):
+            return ImageFont.truetype(candidate, size=size)
+    try:
+        return ImageFont.truetype("DejaVuSansMono.ttf", size=size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _render_table_png(rows):
+    if not rows or Image is None or ImageDraw is None or ImageFont is None:
+        return b""
+    max_columns = max(len(row) for row in rows)
+    normalized_rows = [
+        list(row) + [""] * (max_columns - len(row)) for row in rows
+    ]
+    padding_x = 12
+    padding_y = 10
+    row_height = 28
+    col_widths = [max(80, 0) for _ in range(max_columns)]
+    for row_index, row in enumerate(normalized_rows):
+        for column_index, value in enumerate(row):
+            text = str(value).strip() if value is not None else ""
+            if not text:
+                text = ""
+            font = _default_table_font(12)
+            bbox = ImageDraw.Draw(Image.new("RGB", (1, 1))).textbbox(
+                (0, 0), text, font=font
+            )
+            width = max(80, bbox[2] - bbox[0] + padding_x * 2)
+            if row_index == 0:
+                width = max(width, 110)
+            col_widths[column_index] = max(col_widths[column_index], width)
+
+    image_width = sum(col_widths) + 6
+    image_height = row_height * len(normalized_rows) + 6
+    image = Image.new("RGB", (image_width, image_height), "white")
+    draw = ImageDraw.Draw(image)
+    border_color = (30, 30, 30)
+    header_fill = (238, 238, 238)
+    text_color = (0, 0, 0)
+    font = _default_table_font(12)
+
+    x_cursor = 3
+    y_cursor = 3
+    for row_index, row in enumerate(normalized_rows):
+        fill_color = header_fill if row_index == 0 else "white"
+        current_x = x_cursor
+        for column_index, value in enumerate(row):
+            cell_width = col_widths[column_index]
+            cell_rect = [current_x, y_cursor, current_x + cell_width, y_cursor + row_height]
+            draw.rectangle(cell_rect, fill=fill_color, outline=border_color)
+            text = str(value).strip() if value is not None else ""
+            if text:
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                text_x = current_x + padding_x
+                text_y = y_cursor + (row_height - text_height) // 2
+                draw.text((text_x, text_y), text, font=font, fill=text_color)
+            current_x += cell_width
+        y_cursor += row_height
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _add_table_screenshot(document, rows, screenshot_data=None):
+    try:
+        png_data = screenshot_data or _render_table_png(rows)
+        if png_data and Image is not None:
+            image = Image.open(io.BytesIO(png_data)).convert("RGBA")
+            width, height = image.size
+            padding_left = 3
+            padding_right = 3
+            padded = Image.new("RGBA", (width + padding_left + padding_right, height), (255, 255, 255, 255))
+            padded.paste(image, (padding_left, 0), image)
+            buffer = io.BytesIO()
+            padded.save(buffer, format="PNG")
+            png_data = buffer.getvalue()
+    except Exception:
+        return False
+    if not png_data:
+        return False
+    paragraph = document.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run = paragraph.add_run()
+    run.add_picture(io.BytesIO(png_data), width=Inches(6))
+    return True
+
+
+def _capture_chatgpt_table_screenshots(url, max_tables=None):
+    if webdriver is None or Options is None or By is None or WebDriverWait is None:
+        return []
+
+    driver = webdriver.Chrome(options=_build_chrome_options())
+    screenshots = []
+    try:
+        driver.get(url)
+        WebDriverWait(driver, 20).until(
+            lambda current_driver: current_driver.execute_script(
+                "return document.readyState"
+            )
+            == "complete"
+        )
+        WebDriverWait(driver, 10).until(
+            lambda current_driver: current_driver.find_elements(By.TAG_NAME, "body")
+        )
+        _wait_for_page_content(driver)
+
+        selectors = [
+            "table",
+            "[role='table']",
+            ".table",
+            ".markdown-table",
+            "table[class*='table']",
+            "thead",
+            "tbody",
+            "[data-testid*='table']",
+            "main",
+            "article",
+            "[role='main']",
+        ]
+        seen = set()
+        for selector in selectors:
+            try:
+                candidates = driver.find_elements(By.CSS_SELECTOR, selector)
+                for table in candidates[:200]:
+                    try:
+                        if not table.is_displayed():
+                            continue
+                        identifier = table.id or table.location or table.size
+                        if identifier in seen:
+                            continue
+                        seen.add(identifier)
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+                            table,
+                        )
+                        screenshots.append(_element_to_png_bytes(table))
+                        if max_tables is not None and len(screenshots) >= max_tables:
+                            break
+                    except Exception:
+                        continue
+                if max_tables is not None and len(screenshots) >= max_tables:
+                    break
+            except Exception:
+                continue
+
+        if not screenshots:
+            try:
+                target = _find_best_capture_target(driver, ["main", "article", "[role='main']", "body"])
+                if target is None:
+                    target = driver.find_element(By.TAG_NAME, "body")
+                driver.execute_script("arguments[0].scrollTo(0, 0);", target)
+                screenshots.append(_element_to_png_bytes(target))
+            except Exception:
+                pass
+    finally:
+        driver.quit()
+    return screenshots
+
+
+def _add_response_text(document, text, images=(), heading_content=(), table_screenshots=()):
+    table_screenshots = list(table_screenshots)
     images_by_placeholder = {}
     for image in images:
         images_by_placeholder.setdefault(image.placeholder, []).append(image)
@@ -1642,6 +1837,9 @@ def _add_response_text(document, text, images=(), heading_content=()):
                         rows.append(cells)
                     index += 1
                 if len(rows) > 1:
+                    screenshot_data = table_screenshots.pop(0) if table_screenshots else None
+                    if screenshot_data:
+                        _add_table_screenshot(document, rows, screenshot_data)
                     table = document.add_table(
                         rows=len(rows),
                         cols=max(len(row) for row in rows),
@@ -1807,9 +2005,153 @@ def _apply_document_format(document):
         style.paragraph_format.keep_with_next = True
 
 
-def save_docx(text, destination, images=(), heading_content=()):
+def _build_chrome_options():
+    if Options is None:
+        return None
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--window-size=1600,1200")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-features=UseSkiaRenderer")
+    chrome_options.add_argument("--hide-scrollbars")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    return chrome_options
+
+
+def _element_to_png_bytes(element):
+    fd, temp_path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        element.screenshot(temp_path)
+        with open(temp_path, "rb") as screenshot_file:
+            return screenshot_file.read()
+    finally:
+        try:
+            os.remove(temp_path)
+        except FileNotFoundError:
+            pass
+
+
+def _find_best_capture_target(driver, selectors):
+    best = None
+    best_area = 0
+    for selector in selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+        for element in elements:
+            try:
+                if not element.is_displayed():
+                    continue
+                rect = driver.execute_script(
+                    "return arguments[0].getBoundingClientRect();",
+                    element,
+                )
+                width = float(rect.get("width", 0) or 0)
+                height = float(rect.get("height", 0) or 0)
+                area = width * height
+                if area > best_area:
+                    best = element
+                    best_area = area
+            except Exception:
+                continue
+    return best
+
+
+def _wait_for_page_content(driver, min_text_length=4000):
+    WebDriverWait(driver, 30).until(
+        lambda current_driver: len(
+            (current_driver.find_element(By.TAG_NAME, "body").text or "").strip()
+        )
+        >= min_text_length
+    )
+
+
+def capture_table_screenshot(url, output_path, selector=None):
+    if webdriver is None or Options is None or By is None or WebDriverWait is None:
+        raise RuntimeError(
+            "Selenium is required for table screenshots. Install it with: "
+            "python -m pip install selenium"
+        )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    candidate_selectors = [
+        selector,
+        "table",
+        "[role='table']",
+        ".table",
+        ".markdown-table",
+        "table[class*='table']",
+        "thead",
+        "tbody",
+        "[data-testid*='table']",
+        "main",
+        "article",
+        "[role='main']",
+        "body",
+    ]
+    candidate_selectors = [item for item in candidate_selectors if item]
+
+    driver = webdriver.Chrome(options=_build_chrome_options())
+    try:
+        driver.get(url)
+        WebDriverWait(driver, 20).until(
+            lambda current_driver: current_driver.execute_script(
+                "return document.readyState"
+            )
+            == "complete"
+        )
+        WebDriverWait(driver, 10).until(
+            lambda current_driver: current_driver.find_elements(By.TAG_NAME, "body")
+        )
+        _wait_for_page_content(driver)
+
+        target = _find_best_capture_target(driver, candidate_selectors)
+        if target is None:
+            body = driver.find_element(By.TAG_NAME, "body")
+            driver.execute_script("arguments[0].scrollTo(0, 0);", body)
+            body.screenshot(str(output_path))
+            return output_path
+
+        try:
+            rect = driver.execute_script(
+                "return arguments[0].getBoundingClientRect();",
+                target,
+            )
+            if rect is None or rect.get("width", 0) <= 0 or rect.get("height", 0) <= 0:
+                raise ValueError("Target element has no visible dimensions")
+        except Exception:
+            body = driver.find_element(By.TAG_NAME, "body")
+            body.screenshot(str(output_path))
+            return output_path
+
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+            target,
+        )
+        target.screenshot(str(output_path))
+    finally:
+        driver.quit()
+
+    return output_path
+
+
+def save_docx(text, destination, images=(), heading_content=(), table_screenshots=()):
     document = Document()
-    _add_response_text(document, text, images, heading_content)
+    _add_response_text(
+        document,
+        text,
+        images,
+        heading_content,
+        table_screenshots=table_screenshots,
+    )
     _apply_document_format(document)
     compatibility = document.settings._element.find(qn("w:compat"))
     compatibility_mode = next(
@@ -1933,8 +2275,9 @@ class ChatGPTToDocxApp:
         self.convert_button.grid(row=4, column=1, sticky="e", pady=(10, 0))
         self.progress = ttk.Progressbar(
             frame,
-            mode="indeterminate",
+            mode="determinate",
             maximum=100,
+            value=0,
         )
         self.progress.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         self.progress.grid_remove()
@@ -2094,15 +2437,66 @@ class ChatGPTToDocxApp:
         dialog.grab_set()
         dialog.focus_set()
 
+    def capture_table_from_url(self):
+        url = self.capture_url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("Missing URL", "Paste a page URL first.")
+            return
+        destination = filedialog.asksaveasfilename(
+            title="Save table screenshot",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png")],
+            initialfile="table.png",
+        )
+        if not destination:
+            return
+
+        self.convert_button.configure(state="disabled")
+        self.status.configure(text="Opening Chrome and capturing the table...")
+        self.progress.grid()
+        self.progress.start(12)
+        worker = threading.Thread(
+            target=self._capture_table_in_background,
+            args=(url, destination),
+            daemon=True,
+        )
+        worker.start()
+
+    def _capture_table_in_background(self, url, destination):
+        try:
+            capture_table_screenshot(url, destination)
+        except Exception as error:
+            self.root.after(0, self._finish_table_capture, None, error)
+        else:
+            self.root.after(0, self._finish_table_capture, destination, None)
+
+    def _finish_table_capture(self, destination, error):
+        self.progress.stop()
+        self.progress.grid_remove()
+        self.convert_button.configure(state="normal")
+        if error is not None:
+            self.status.configure(text="Table screenshot failed.")
+            self.show_error_dialog(error)
+            return
+        self.status.configure(text=f"Saved table screenshot: {destination}")
+        messagebox.showinfo(
+            "Table screenshot saved",
+            f"PNG saved to:\n{destination}",
+        )
+
+    def _set_progress(self, value, text=None):
+        self.progress.configure(value=value)
+        if text is not None:
+            self.status.configure(text=text)
+
     def convert(self):
         url = self.url_entry.get().strip()
         destination = self.destination_entry.get().strip()
         heading_content = self._pasted_text_content()
 
         self.convert_button.configure(state="disabled")
-        self.status.configure(text="Fetching the latest reply...")
+        self._set_progress(0, "Fetching the latest reply...")
         self.progress.grid()
-        self.progress.start(12)
         worker = threading.Thread(
             target=self._convert_in_background,
             args=(url, destination, heading_content),
@@ -2112,7 +2506,11 @@ class ChatGPTToDocxApp:
 
     def _convert_in_background(self, url, destination, heading_content):
         try:
+            self.root.after(0, self._set_progress, 10, "Fetching the latest reply...")
             text, images = fetch_latest_response_with_images(url)
+            self.root.after(0, self._set_progress, 40, "Capturing table screenshots...")
+            table_screenshots = _capture_chatgpt_table_screenshots(url)
+            self.root.after(0, self._set_progress, 75, "Saving Word document...")
             if not destination:
                 destination = str(default_output_path(text))
             save_docx(
@@ -2120,6 +2518,7 @@ class ChatGPTToDocxApp:
                 destination,
                 images,
                 heading_content,
+                table_screenshots=table_screenshots,
             )
         except (ValueError, requests.RequestException, OSError) as error:
             self.root.after(
@@ -2137,7 +2536,7 @@ class ChatGPTToDocxApp:
             )
 
     def _finish_conversion(self, destination, error):
-        self.progress.stop()
+        self.progress.configure(value=100)
         self.progress.grid_remove()
         self.convert_button.configure(state="normal")
         if error is not None:
