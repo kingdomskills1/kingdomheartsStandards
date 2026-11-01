@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import tkinter as tk
@@ -23,6 +24,11 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from lxml import etree
+
+try:
+    import pystray
+except ImportError:  # pragma: no cover - optional tray support
+    pystray = None
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -48,6 +54,83 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 )
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_CONSOLE_CTRL_HANDLER = None
+
+
+def _install_console_close_handler():
+    """Keep the GUI process alive when the user closes the attached console window."""
+    global _CONSOLE_CTRL_HANDLER
+    if os.name != "nt":
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32.dll")
+    except (AttributeError, OSError):
+        return False
+
+    @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong)
+    def _handler(ctrl_type):
+        if ctrl_type == 2:  # CTRL_CLOSE_EVENT
+            return 1
+        return 0
+
+    try:
+        kernel32.SetConsoleCtrlHandler.argtypes = [
+            ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong),
+            ctypes.c_int,
+        ]
+        kernel32.SetConsoleCtrlHandler.restype = ctypes.c_int
+        if kernel32.SetConsoleCtrlHandler(_handler, 1):
+            _CONSOLE_CTRL_HANDLER = _handler
+            return True
+    except (AttributeError, ValueError):
+        pass
+    return False
+
+
+def app_state_path():
+    base_dir = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+    return base_dir / "ChatGPTToDocx" / "state.json"
+
+
+def show_program_console():
+    """Open a console window for this Windows GUI app when bundled with --windowed."""
+    if os.name != "nt":
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32.dll")
+    except (AttributeError, OSError):
+        return False
+    if kernel32.GetConsoleWindow() == 0:
+        if not kernel32.AllocConsole():
+            return False
+    _install_console_close_handler()
+    sys.stdin = open("CONIN$", "r", encoding="utf-8", buffering=1)
+    sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+    sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+    return True
+
+
+def hide_program_console():
+    """Detach the process from its console so the GUI can continue running."""
+    if os.name != "nt":
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32.dll")
+    except (AttributeError, OSError):
+        return False
+    if kernel32.GetConsoleWindow() == 0:
+        return False
+    kernel32.FreeConsole()
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            if stream is not None and hasattr(stream, "close"):
+                stream.close()
+        except OSError:
+            pass
+    sys.stdin = open(os.devnull, "r", encoding="utf-8")
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    return True
 
 
 @dataclass(frozen=True)
@@ -2208,8 +2291,14 @@ def save_docx(text, destination, images=(), heading_content=(), table_screenshot
 class ChatGPTToDocxApp:
     def __init__(self, root):
         self.root = root
+        self.state_path = app_state_path()
+        self._hidden = False
+        self.console_visible = False
+        self.tray_icon = None
+        self._tray_started = False
         root.title("ChatGPT to Word")
         root.minsize(680, 500)
+        root.protocol("WM_DELETE_WINDOW", self.hide_window)
 
         frame = ttk.Frame(root, padding=16)
         frame.grid(sticky="nsew")
@@ -2237,11 +2326,18 @@ class ChatGPTToDocxApp:
             frame,
             text="Formatted text after headings (skip headings with subheadings):",
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 4))
+        clear_button_frame = ttk.Frame(frame)
+        clear_button_frame.grid(row=2, column=2, sticky="e", pady=(8, 4))
         ttk.Button(
-            frame,
+            clear_button_frame,
             text="Clear",
             command=self.clear_pasted_text,
-        ).grid(row=2, column=2, sticky="e", pady=(8, 4))
+        ).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(
+            clear_button_frame,
+            text="Clear all",
+            command=self.clear_all_fields,
+        ).grid(row=0, column=1)
         pasted_frame = ttk.Frame(frame)
         pasted_frame.grid(row=3, column=0, columnspan=3, sticky="nsew")
         pasted_frame.rowconfigure(0, weight=1)
@@ -2269,10 +2365,23 @@ class ChatGPTToDocxApp:
         self.pasted_text.bind("<Shift-Insert>", self.paste_formatted_text)
         self.pasted_text.bind("<<Paste>>", self.paste_formatted_text)
 
+        self.console_button = ttk.Button(
+            frame,
+            text="Open console",
+            command=self.open_console,
+        )
+        self.console_button.grid(row=4, column=0, sticky="w", pady=(10, 0))
         self.convert_button = ttk.Button(
             frame, text="Convert latest reply", command=self.convert
         )
         self.convert_button.grid(row=4, column=1, sticky="e", pady=(10, 0))
+        self.cancel_button = ttk.Button(
+            frame,
+            text="Cancel",
+            command=self.cancel_conversion,
+            state="disabled",
+        )
+        self.cancel_button.grid(row=4, column=2, sticky="e", pady=(10, 0))
         self.progress = ttk.Progressbar(
             frame,
             mode="determinate",
@@ -2283,10 +2392,162 @@ class ChatGPTToDocxApp:
         self.progress.grid_remove()
         self.status = ttk.Label(frame, text="Only public ChatGPT share links are supported.")
         self.status.grid(row=6, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        self._cancel_event = threading.Event()
+        self.restore_state()
+
+    def save_state(self):
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            paragraphs = self._pasted_text_content()
+            serialized = []
+            for paragraph in paragraphs:
+                runs = []
+                for run in paragraph.runs:
+                    formatted = run.format
+                    runs.append(
+                        {
+                            "text": run.text,
+                            "format": {
+                                "bold": formatted.bold,
+                                "italic": formatted.italic,
+                                "underline": formatted.underline,
+                                "color": formatted.color,
+                                "background": formatted.background,
+                                "font_name": formatted.font_name,
+                                "font_size": formatted.font_size,
+                            },
+                        }
+                    )
+                serialized.append({"runs": runs})
+            payload = {
+                "url": self.url_entry.get().strip(),
+                "destination": self.destination_entry.get().strip(),
+                "paragraphs": serialized,
+            }
+            with self.state_path.open("w", encoding="utf-8") as file:
+                json.dump(payload, file, ensure_ascii=False)
+        except OSError:
+            pass
+
+    def restore_state(self):
+        if not self.state_path.exists():
+            return
+        try:
+            with self.state_path.open("r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, ValueError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        url = payload.get("url", "")
+        destination = payload.get("destination", "")
+        paragraphs = payload.get("paragraphs", [])
+        if url:
+            self.url_entry.insert(0, url)
+        if destination:
+            self.destination_entry.insert(0, destination)
+        if paragraphs:
+            restored = []
+            for paragraph in paragraphs:
+                runs = []
+                for run in paragraph.get("runs", []):
+                    format_values = run.get("format", {})
+                    runs.append(
+                        PastedTextRun(
+                            run.get("text", ""),
+                            PastedTextFormat(
+                                bold=bool(format_values.get("bold", False)),
+                                italic=bool(format_values.get("italic", False)),
+                                underline=bool(format_values.get("underline", False)),
+                                color=format_values.get("color"),
+                                background=format_values.get("background"),
+                                font_name=format_values.get("font_name"),
+                                font_size=format_values.get("font_size"),
+                            ),
+                        )
+                    )
+                restored.append(PastedTextParagraph(tuple(runs)))
+            if restored:
+                self._insert_pasted_paragraphs(tuple(restored))
+
+    def _create_tray_icon(self):
+        if pystray is None or os.name != "nt":
+            return None
+        if self.tray_icon is not None:
+            return self.tray_icon
+        if Image is None:
+            return None
+        icon_image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(icon_image)
+        draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill=(29, 91, 201, 255))
+        draw.text((22, 18), "W", fill=(255, 255, 255, 255))
+        tray = pystray.Icon(
+            "chatgpt_to_docx",
+            icon_image,
+            "ChatGPT to Word",
+            menu=pystray.Menu(
+                pystray.MenuItem("Restore", self.restore_window),
+                pystray.MenuItem("Open console", self.open_console),
+                pystray.MenuItem("Exit", self.exit_app),
+            ),
+        )
+        self.tray_icon = tray
+        return tray
+
+    def _show_tray(self):
+        tray = self._create_tray_icon()
+        if tray is None or self._tray_started:
+            return
+        self._tray_started = True
+        try:
+            tray.run_detached()
+        except AttributeError:
+            tray.run()
+
+    def hide_window(self):
+        self.save_state()
+        hide_program_console()
+        self.root.withdraw()
+        self._hidden = True
+        self.console_visible = False
+        self._show_tray()
+        self.status.configure(text="Window hidden. The app keeps running in the background.")
+
+    def restore_window(self):
+        if self._hidden:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.focus_force()
+            self._hidden = False
+            if self.tray_icon is not None:
+                try:
+                    self.tray_icon.stop()
+                except Exception:
+                    pass
+                self.tray_icon = None
+            self._tray_started = False
+            self.status.configure(text="Window restored.")
+
+    def exit_app(self):
+        self.save_state()
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
+        self._tray_started = False
+        self.root.destroy()
 
     def clear_pasted_text(self):
         self.pasted_text.delete("1.0", "end")
         self.pasted_text.focus_set()
+
+    def clear_all_fields(self):
+        self.url_entry.delete(0, tk.END)
+        self.destination_entry.delete(0, tk.END)
+        self.clear_pasted_text()
+        self.status.configure(text="All fields cleared.")
 
     def _format_tag(self, formatting):
         tag = self._preview_formats.get(formatting)
@@ -2389,6 +2650,20 @@ class ChatGPTToDocxApp:
             paragraphs.pop()
         return tuple(paragraphs)
 
+    def open_console(self):
+        if getattr(self, "console_visible", False):
+            if hide_program_console():
+                self.console_visible = False
+                self.status.configure(text="Console hidden. The app is still running in the GUI.")
+            else:
+                self.status.configure(text="Console is unavailable in this environment.")
+            return
+        if show_program_console():
+            self.console_visible = True
+            self.status.configure(text="Console opened. Errors and progress will print here.")
+        else:
+            self.status.configure(text="Console is unavailable in this environment.")
+
     def choose_destination(self):
         destination = filedialog.asksaveasfilename(
             title="Save Word document",
@@ -2489,12 +2764,21 @@ class ChatGPTToDocxApp:
         if text is not None:
             self.status.configure(text=text)
 
+    def cancel_conversion(self):
+        if not self._cancel_event.is_set():
+            self._cancel_event.set()
+            self.cancel_button.configure(state="disabled")
+            self.status.configure(text="Cancelling conversion...")
+
     def convert(self):
+        if self._cancel_event.is_set():
+            self._cancel_event.clear()
         url = self.url_entry.get().strip()
         destination = self.destination_entry.get().strip()
         heading_content = self._pasted_text_content()
 
         self.convert_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
         self._set_progress(0, "Fetching the latest reply...")
         self.progress.grid()
         worker = threading.Thread(
@@ -2506,13 +2790,21 @@ class ChatGPTToDocxApp:
 
     def _convert_in_background(self, url, destination, heading_content):
         try:
+            if self._cancel_event.is_set():
+                raise RuntimeError("Conversion cancelled.")
             self.root.after(0, self._set_progress, 10, "Fetching the latest reply...")
             text, images = fetch_latest_response_with_images(url)
+            if self._cancel_event.is_set():
+                raise RuntimeError("Conversion cancelled.")
             self.root.after(0, self._set_progress, 40, "Capturing table screenshots...")
             table_screenshots = _capture_chatgpt_table_screenshots(url)
+            if self._cancel_event.is_set():
+                raise RuntimeError("Conversion cancelled.")
             self.root.after(0, self._set_progress, 75, "Saving Word document...")
             if not destination:
                 destination = str(default_output_path(text))
+            if self._cancel_event.is_set():
+                raise RuntimeError("Conversion cancelled.")
             save_docx(
                 text,
                 destination,
@@ -2520,12 +2812,18 @@ class ChatGPTToDocxApp:
                 heading_content,
                 table_screenshots=table_screenshots,
             )
+        except RuntimeError as error:
+            if str(error) == "Conversion cancelled.":
+                self.root.after(0, self._finish_conversion, None, None, True)
+            else:
+                self.root.after(0, self._finish_conversion, None, error, False)
         except (ValueError, requests.RequestException, OSError) as error:
             self.root.after(
                 0,
                 self._finish_conversion,
                 None,
                 error,
+                False,
             )
         else:
             self.root.after(
@@ -2533,12 +2831,18 @@ class ChatGPTToDocxApp:
                 self._finish_conversion,
                 destination,
                 None,
+                False,
             )
 
-    def _finish_conversion(self, destination, error):
+    def _finish_conversion(self, destination, error, cancelled=False):
         self.progress.configure(value=100)
         self.progress.grid_remove()
         self.convert_button.configure(state="normal")
+        self.cancel_button.configure(state="disabled")
+        self._cancel_event.clear()
+        if cancelled:
+            self.status.configure(text="Conversion cancelled.")
+            return
         if error is not None:
             self.status.configure(text="Conversion failed.")
             self.show_error_dialog(error)

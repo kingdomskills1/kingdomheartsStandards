@@ -13,7 +13,9 @@ public ChatGPT shared-conversation link to a Microsoft Word `.docx` file.
    ```
 
 3. Double-click `run.bat`.
-4. In ChatGPT, use the conversation's **Share** option to create a public
+4. The app minimizes to the system tray when you close the window; right-click
+   the tray icon to restore it or exit the program.
+5. In ChatGPT, use the conversation's **Share** option to create a public
    link. Paste the `https://chatgpt.com/share/...` or
    `https://chatgpt.com/s/...` link, choose where to save the document, and
    select **Convert latest reply**.
