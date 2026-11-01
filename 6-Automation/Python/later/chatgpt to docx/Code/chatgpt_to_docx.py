@@ -6,6 +6,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover - optional enhancement
 
 try:
     from selenium import webdriver
+    from selenium.common.exceptions import TimeoutException
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -47,6 +49,7 @@ except ImportError:  # pragma: no cover - optional browser helper
     Options = None
     By = None
     WebDriverWait = None
+    TimeoutException = None
 
 
 USER_AGENT = (
@@ -1735,7 +1738,7 @@ def _add_table_screenshot(document, rows, screenshot_data=None):
     return True
 
 
-def _capture_chatgpt_table_screenshots(url, max_tables=None):
+def _capture_chatgpt_table_screenshots(url, max_tables=None, cancel_event=None):
     if webdriver is None or Options is None or By is None or WebDriverWait is None:
         return []
 
@@ -1743,16 +1746,19 @@ def _capture_chatgpt_table_screenshots(url, max_tables=None):
     screenshots = []
     try:
         driver.get(url)
-        WebDriverWait(driver, 20).until(
-            lambda current_driver: current_driver.execute_script(
-                "return document.readyState"
-            )
-            == "complete"
-        )
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Conversion cancelled.")
+            if driver.execute_script("return document.readyState") == "complete":
+                break
+            time.sleep(0.2)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Conversion cancelled.")
         WebDriverWait(driver, 10).until(
             lambda current_driver: current_driver.find_elements(By.TAG_NAME, "body")
         )
-        _wait_for_page_content(driver)
+        _wait_for_page_content(driver, cancel_event=cancel_event)
 
         selectors = [
             "table",
@@ -1769,10 +1775,14 @@ def _capture_chatgpt_table_screenshots(url, max_tables=None):
         ]
         seen = set()
         for selector in selectors:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Conversion cancelled.")
             try:
                 candidates = driver.find_elements(By.CSS_SELECTOR, selector)
                 for table in candidates[:200]:
                     try:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise RuntimeError("Conversion cancelled.")
                         if not table.is_displayed():
                             continue
                         identifier = table.id or table.location or table.size
@@ -1786,20 +1796,28 @@ def _capture_chatgpt_table_screenshots(url, max_tables=None):
                         screenshots.append(_element_to_png_bytes(table))
                         if max_tables is not None and len(screenshots) >= max_tables:
                             break
+                    except RuntimeError:
+                        raise
                     except Exception:
                         continue
                 if max_tables is not None and len(screenshots) >= max_tables:
                     break
+            except RuntimeError:
+                raise
             except Exception:
                 continue
 
         if not screenshots:
             try:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("Conversion cancelled.")
                 target = _find_best_capture_target(driver, ["main", "article", "[role='main']", "body"])
                 if target is None:
                     target = driver.find_element(By.TAG_NAME, "body")
                 driver.execute_script("arguments[0].scrollTo(0, 0);", target)
                 screenshots.append(_element_to_png_bytes(target))
+            except RuntimeError:
+                raise
             except Exception:
                 pass
     finally:
@@ -2146,13 +2164,21 @@ def _find_best_capture_target(driver, selectors):
     return best
 
 
-def _wait_for_page_content(driver, min_text_length=4000):
-    WebDriverWait(driver, 30).until(
-        lambda current_driver: len(
-            (current_driver.find_element(By.TAG_NAME, "body").text or "").strip()
-        )
-        >= min_text_length
-    )
+def _wait_for_page_content(driver, min_text_length=4000, cancel_event=None):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Conversion cancelled.")
+        try:
+            body_text = (driver.find_element(By.TAG_NAME, "body").text or "").strip()
+        except Exception:
+            body_text = ""
+        if len(body_text) >= min_text_length:
+            return
+        time.sleep(0.2)
+    if TimeoutException is not None:
+        raise TimeoutException("Page content did not finish loading before the timeout.")
+    raise RuntimeError("Page content did not finish loading before the timeout.")
 
 
 def capture_table_screenshot(url, output_path, selector=None):
@@ -2797,7 +2823,7 @@ class ChatGPTToDocxApp:
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
             self.root.after(0, self._set_progress, 40, "Capturing table screenshots...")
-            table_screenshots = _capture_chatgpt_table_screenshots(url)
+            table_screenshots = _capture_chatgpt_table_screenshots(url, cancel_event=self._cancel_event)
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
             self.root.after(0, self._set_progress, 75, "Saving Word document...")
@@ -2817,14 +2843,17 @@ class ChatGPTToDocxApp:
                 self.root.after(0, self._finish_conversion, None, None, True)
             else:
                 self.root.after(0, self._finish_conversion, None, error, False)
-        except (ValueError, requests.RequestException, OSError) as error:
-            self.root.after(
-                0,
-                self._finish_conversion,
-                None,
-                error,
-                False,
-            )
+        except Exception as error:
+            if self._cancel_event.is_set():
+                self.root.after(0, self._finish_conversion, None, None, True)
+                return
+            if TimeoutException is not None and isinstance(error, TimeoutException):
+                self.root.after(0, self._finish_conversion, None, error, False)
+                return
+            if isinstance(error, (ValueError, requests.RequestException, OSError)):
+                self.root.after(0, self._finish_conversion, None, error, False)
+                return
+            self.root.after(0, self._finish_conversion, None, error, False)
         else:
             self.root.after(
                 0,
