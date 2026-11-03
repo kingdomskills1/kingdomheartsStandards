@@ -51,6 +51,12 @@ except ImportError:  # pragma: no cover - optional browser helper
     WebDriverWait = None
     TimeoutException = None
 
+_SHARE_BOILERPLATE = (
+    "This is a copy of a shared ChatGPT chat",
+    "It won't be added to memory",
+    "Report conversation",
+    "ChatGPT is AI and can make mistakes",
+)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1738,92 +1744,51 @@ def _add_table_screenshot(document, rows, screenshot_data=None):
     return True
 
 
-def _capture_chatgpt_table_screenshots(url, max_tables=None, cancel_event=None):
+def _capture_chatgpt_table_screenshots(url, max_tables=None, cancel_event=None, attempts=3):
     if webdriver is None or Options is None or By is None or WebDriverWait is None:
         return []
 
-    driver = webdriver.Chrome(options=_build_chrome_options())
-    screenshots = []
-    try:
-        driver.get(url)
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("Conversion cancelled.")
-            if driver.execute_script("return document.readyState") == "complete":
-                break
-            time.sleep(0.2)
+    def check_cancel():
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Conversion cancelled.")
-        WebDriverWait(driver, 10).until(
-            lambda current_driver: current_driver.find_elements(By.TAG_NAME, "body")
-        )
-        _wait_for_page_content(driver, cancel_event=cancel_event)
 
-        selectors = [
-            "table",
-            "[role='table']",
-            ".table",
-            ".markdown-table",
-            "table[class*='table']",
-            "thead",
-            "tbody",
-            "[data-testid*='table']",
-            "main",
-            "article",
-            "[role='main']",
-        ]
-        seen = set()
-        for selector in selectors:
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("Conversion cancelled.")
-            try:
-                candidates = driver.find_elements(By.CSS_SELECTOR, selector)
-                for table in candidates[:200]:
-                    try:
-                        if cancel_event is not None and cancel_event.is_set():
-                            raise RuntimeError("Conversion cancelled.")
-                        if not table.is_displayed():
-                            continue
-                        identifier = table.id or table.location or table.size
-                        if identifier in seen:
-                            continue
-                        seen.add(identifier)
-                        driver.execute_script(
-                            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
-                            table,
-                        )
-                        screenshots.append(_element_to_png_bytes(table))
-                        if max_tables is not None and len(screenshots) >= max_tables:
-                            break
-                    except RuntimeError:
-                        raise
-                    except Exception:
+    for _attempt in range(attempts):
+        check_cancel()
+        driver = webdriver.Chrome(options=_build_chrome_options())
+        try:
+            driver.get(url)
+            ready = _wait_for_page_content(driver, cancel_event=cancel_event)
+            tables = [
+                table
+                for table in driver.find_elements(By.CSS_SELECTOR, "table")
+                if table.is_displayed()
+            ]
+            if not ready or not tables:
+                continue  # page did not hydrate: retry with a fresh browser
+
+            screenshots = []
+            for table in tables:
+                check_cancel()
+                try:
+                    size = table.size
+                    if size["width"] < 50 or size["height"] < 30:
                         continue
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center'});", table
+                    )
+                    time.sleep(0.3)
+                    screenshots.append(_element_to_png_bytes(table))
+                except RuntimeError:
+                    raise
+                except Exception:
+                    continue
                 if max_tables is not None and len(screenshots) >= max_tables:
                     break
-            except RuntimeError:
-                raise
-            except Exception:
-                continue
-
-        if not screenshots:
-            try:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("Conversion cancelled.")
-                target = _find_best_capture_target(driver, ["main", "article", "[role='main']", "body"])
-                if target is None:
-                    target = driver.find_element(By.TAG_NAME, "body")
-                driver.execute_script("arguments[0].scrollTo(0, 0);", target)
-                screenshots.append(_element_to_png_bytes(target))
-            except RuntimeError:
-                raise
-            except Exception:
-                pass
-    finally:
-        driver.quit()
-    return screenshots
-
+            if screenshots:
+                return screenshots
+        finally:
+            driver.quit()
+    return []
 
 def _add_response_text(document, text, images=(), heading_content=(), table_screenshots=()):
     table_screenshots = list(table_screenshots)
@@ -2164,22 +2129,43 @@ def _find_best_capture_target(driver, selectors):
     return best
 
 
-def _wait_for_page_content(driver, min_text_length=4000, cancel_event=None):
-    deadline = time.monotonic() + 30
+def _wait_for_page_content(driver, cancel_event=None, timeout=90, stable_seconds=3.0):
+    script = """
+    window.scrollTo(0, document.body.scrollHeight);
+    return {
+        tables: document.querySelectorAll("table, [role='table']").length,
+        text: (document.body.innerText || "")
+    };
+    """
+    deadline = time.monotonic() + timeout
+    last_signature = None
+    stable_since = None
     while time.monotonic() < deadline:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Conversion cancelled.")
         try:
-            body_text = (driver.find_element(By.TAG_NAME, "body").text or "").strip()
+            result = driver.execute_script(script)
         except Exception:
-            body_text = ""
-        if len(body_text) >= min_text_length:
-            return
-        time.sleep(0.2)
-    if TimeoutException is not None:
-        raise TimeoutException("Page content did not finish loading before the timeout.")
-    raise RuntimeError("Page content did not finish loading before the timeout.")
-
+            result = {"tables": 0, "text": ""}
+        text = result["text"]
+        for phrase in _SHARE_BOILERPLATE:
+            text = text.replace(phrase, "")
+        real_length = len(text.strip())
+        has_content = result["tables"] > 0
+        signature = (result["tables"], real_length)
+        now = time.monotonic()
+        if has_content:
+            if signature == last_signature:
+                if stable_since is None:
+                    stable_since = now
+                elif now - stable_since >= stable_seconds:
+                    driver.execute_script("window.scrollTo(0, 0);")
+                    return True
+            else:
+                last_signature = signature
+                stable_since = None
+        time.sleep(0.4)
+    return False  # never raise: the docx can still be built without screenshots
 
 def capture_table_screenshot(url, output_path, selector=None):
     if webdriver is None or Options is None or By is None or WebDriverWait is None:
@@ -2815,6 +2801,7 @@ class ChatGPTToDocxApp:
         worker.start()
 
     def _convert_in_background(self, url, destination, heading_content):
+        warnings = []
         try:
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
@@ -2822,8 +2809,47 @@ class ChatGPTToDocxApp:
             text, images = fetch_latest_response_with_images(url)
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
-            self.root.after(0, self._set_progress, 40, "Capturing table screenshots...")
-            table_screenshots = _capture_chatgpt_table_screenshots(url, cancel_event=self._cancel_event)
+
+            table_pattern = r"^\s*\|.+\|\s*$\n^\s*\|?[\s:|-]+\|?\s*$"
+            table_count = len(re.findall(table_pattern, text, re.MULTILINE))
+            table_screenshots = []
+
+            if table_count:
+                self.root.after(
+                    0, self._set_progress, 40, "Capturing table screenshots..."
+                )
+                capture_error = None
+                try:
+                    table_screenshots = _capture_chatgpt_table_screenshots(
+                        url, cancel_event=self._cancel_event
+                    )
+                except RuntimeError as screenshot_error:
+                    if str(screenshot_error) == "Conversion cancelled.":
+                        raise
+                    capture_error = screenshot_error
+                except Exception as screenshot_error:
+                    capture_error = screenshot_error
+
+                if capture_error is not None:
+                    warnings.append(
+                        "Table screenshots failed with an error:\n"
+                        f"{type(capture_error).__name__}: {capture_error}"
+                    )
+                    table_screenshots = []
+                elif not table_screenshots:
+                    warnings.append(
+                        "Could not capture the table screenshots after 3 attempts "
+                        "(the ChatGPT page did not finish loading, or "
+                        "Selenium/Chrome is not available)."
+                    )
+                elif len(table_screenshots) != table_count:
+                    warnings.append(
+                        f"Captured {len(table_screenshots)} table screenshot(s) "
+                        f"but the reply has {table_count} table(s), so the "
+                        "screenshots were skipped."
+                    )
+                    table_screenshots = []
+
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
             self.root.after(0, self._set_progress, 75, "Saving Word document...")
@@ -2847,12 +2873,6 @@ class ChatGPTToDocxApp:
             if self._cancel_event.is_set():
                 self.root.after(0, self._finish_conversion, None, None, True)
                 return
-            if TimeoutException is not None and isinstance(error, TimeoutException):
-                self.root.after(0, self._finish_conversion, None, error, False)
-                return
-            if isinstance(error, (ValueError, requests.RequestException, OSError)):
-                self.root.after(0, self._finish_conversion, None, error, False)
-                return
             self.root.after(0, self._finish_conversion, None, error, False)
         else:
             self.root.after(
@@ -2861,9 +2881,10 @@ class ChatGPTToDocxApp:
                 destination,
                 None,
                 False,
+                tuple(warnings),
             )
 
-    def _finish_conversion(self, destination, error, cancelled=False):
+    def _finish_conversion(self, destination, error, cancelled=False, warnings=()):
         self.progress.configure(value=100)
         self.progress.grid_remove()
         self.convert_button.configure(state="normal")
@@ -2879,12 +2900,23 @@ class ChatGPTToDocxApp:
 
         if not self.destination_entry.get().strip():
             self.destination_entry.insert(0, destination)
-        self.status.configure(text=f"Saved: {destination}")
-        messagebox.showinfo(
-            "Conversion complete",
-            f"Word document saved to:\n{destination}",
-        )
 
+        if warnings:
+            self.status.configure(text=f"Saved with warnings: {destination}")
+            messagebox.showwarning(
+                "Saved, but table screenshots are missing",
+                "Word document saved to:\n"
+                f"{destination}\n\n"
+                + "\n\n".join(warnings)
+                + "\n\nThe tables were still built from the text, but without "
+                "the screenshot images. Try converting again if you need them.",
+            )
+        else:
+            self.status.configure(text=f"Saved: {destination}")
+            messagebox.showinfo(
+                "Conversion complete",
+                f"Word document saved to:\n{destination}",
+            )
 
 def main():
     root = tk.Tk()
