@@ -2070,6 +2070,22 @@ def _capture_chatgpt_table_screenshots(url, max_tables=None, cancel_event=None, 
     return tables[:max_tables] if max_tables is not None else tables
 
 
+def _new_list_number_id(document, style_name="List Number"):
+    """Create a fresh numbering instance (restarting at 1) for the style's list."""
+    numbering = document.part.numbering_part.numbering_definitions._numbering
+    style_num_id = document.styles[style_name].element.pPr.numPr.numId.val
+    abstract_id = numbering.num_having_numId(style_num_id).abstractNumId.val
+    new_num = numbering.add_num(abstract_id)
+    new_num.add_lvlOverride(ilvl=0).add_startOverride(1)
+    return new_num.numId
+
+
+def _apply_list_number_id(paragraph, num_id):
+    num_pr = paragraph._p.get_or_add_pPr().get_or_add_numPr()
+    num_pr.get_or_add_ilvl().val = 0
+    num_pr.get_or_add_numId().val = num_id
+
+
 def _add_response_text(
     document,
     text,
@@ -2110,6 +2126,7 @@ def _add_response_text(
         )
         for line in lines
     )
+    list_num_id = None  # current numbered-list instance; reset at every heading
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -2289,8 +2306,9 @@ def _add_response_text(
         heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
         numbered_section_heading = _numbered_section_heading(stripped)
         bullet = re.match(r"^(?:[-*+]|[·•▪●○‣◦])\s+(.+)$", stripped)
-        numbered = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+        numbered = re.match(r"^(\d+)[.)]\s+(.+)$", stripped)
         if heading:
+            list_num_id = None  # next numbered list restarts at 1
             if len(heading.group(1)) == 1 and not main_heading_seen:
                 main_heading_seen = True
                 main_heading_image_window = True
@@ -2322,6 +2340,7 @@ def _add_response_text(
             ):
                 _add_pasted_text(document, heading_content)
         elif numbered_section_heading:
+            list_num_id = None  # next numbered list restarts at 1
             heading_level = _numbered_heading_level(
                 numbered_section_heading
             )
@@ -2337,8 +2356,12 @@ def _add_response_text(
             paragraph = document.add_paragraph(style="List Bullet")
             _add_inline_runs(paragraph, bullet.group(1))
         elif numbered:
+            # restart under a new heading, or whenever the list itself says "1."
+            if list_num_id is None or int(numbered.group(1)) == 1:
+                list_num_id = _new_list_number_id(document)
             paragraph = document.add_paragraph(style="List Number")
-            _add_inline_runs(paragraph, numbered.group(1))
+            _apply_list_number_id(paragraph, list_num_id)
+            _add_inline_runs(paragraph, numbered.group(2))
         else:
             if stripped.startswith(r"\]") or stripped == "$$":
                 index += 1
