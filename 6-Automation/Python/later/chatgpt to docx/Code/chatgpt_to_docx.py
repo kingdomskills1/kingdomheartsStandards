@@ -1,3 +1,4 @@
+import base64
 import ctypes
 import io
 import json
@@ -63,6 +64,15 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 )
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+# Plain-text (``` fenced) blocks, e.g. the "Main Classification" tree, are
+# screenshotted from the ChatGPT page just like tables.
+SCREENSHOT_CODE_BLOCKS = True
+# Same as tables: keep the real text under the screenshot. Set to False to
+# insert only the screenshot image for each plain-text block.
+KEEP_CODE_TEXT_AFTER_SCREENSHOT = True
+# If the Chrome screenshot of a plain-text block is missing or fails, draw an
+# identical-looking block ("</> Plain text" header, copy icons) with Pillow.
+FALLBACK_RENDER_CODE_BLOCKS = True
 _CONSOLE_CTRL_HANDLER = None
 
 
@@ -842,7 +852,9 @@ def _fetch_response_record(url):
         timeout=30,
     )
     response.raise_for_status()
-    return _latest_response_record(response.text)
+    text, metadata = _latest_response_record(response.text)
+    text = _replace_entity_tags(text)
+    return _normalize_image_placeholders(text), metadata
 
 
 def fetch_latest_response_with_images(url):
@@ -861,13 +873,48 @@ def fetch_latest_response(url):
 
 def extract_latest_response(html):
     text, _metadata = _latest_response_record(html)
-    return text
+    return _normalize_image_placeholders(_replace_entity_tags(text))
+
+
+_IMAGE_PLACEHOLDER_RE = re.compile(r"<AsyncImage(?:Group)?\b[^>]*?/?>")
+_ENTITY_TAG_RE = re.compile(
+    r"<Entity\b[^>]*?\bvalue\s*=\s*(?:\"([^\"]*)\"|'([^']*)')[^>]*?/>",
+    re.IGNORECASE,
+)
+_ENTITY_PAIRED_RE = re.compile(
+    r"<Entity\b[^>]*?>(.*?)</Entity\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _replace_entity_tags(text):
+    """<Entity value="Cube" .../> -> Cube  (and <Entity ...>Cube</Entity> -> Cube)."""
+    text = _ENTITY_TAG_RE.sub(
+        lambda match: match.group(1) if match.group(1) is not None else match.group(2),
+        text,
+    )
+    return _ENTITY_PAIRED_RE.sub(lambda match: match.group(1), text)
+
+
+def _normalize_image_placeholders(text):
+    """Collapse each (possibly multi-line) image tag onto its own single line."""
+    return _IMAGE_PLACEHOLDER_RE.sub(
+        lambda match: "\n" + re.sub(r"\s+", " ", match.group()).strip() + "\n",
+        text,
+    )
 
 
 def _clean_inline_text(text):
-    text = re.sub(r"<AsyncImage(?:Group)?\b[^>]*?/?>", "", text)
+    text = _replace_entity_tags(text)
+    text = _IMAGE_PLACEHOLDER_RE.sub("", text)
     text = re.sub(
         r"</?(?:box|row|divider)\b[^>]*?/?>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"</?cites?\b[^>]*>",
         "",
         text,
         flags=re.IGNORECASE,
@@ -1720,6 +1767,151 @@ def _render_table_png(rows):
     return buffer.getvalue()
 
 
+def _fenced_code_blocks(text):
+    """Lines of every ``` fenced block in the reply, in order."""
+    blocks = []
+    current = []
+    inside = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            if inside:
+                blocks.append(current)
+                current = []
+            inside = not inside
+            continue
+        if inside:
+            current.append(line)
+    if inside:
+        blocks.append(current)
+    return blocks
+
+
+def _text_without_code_blocks(text):
+    kept = []
+    inside = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            inside = not inside
+            continue
+        if not inside:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _code_block_label(info):
+    info = (info or "").strip().split()[0].lower() if (info or "").strip() else ""
+    if info in {"", "text", "plaintext", "plain", "txt"}:
+        return "Plain text"
+    names = {"js": "JavaScript", "javascript": "JavaScript", "py": "Python",
+             "python": "Python", "json": "JSON", "html": "HTML", "css": "CSS",
+             "bash": "Bash", "sh": "Shell", "sql": "SQL", "yaml": "YAML",
+             "xml": "XML", "latex": "LaTeX", "ts": "TypeScript"}
+    return names.get(info, info.capitalize())
+
+
+def _first_font(paths, size):
+    if ImageFont is None:
+        return None
+    for path in paths:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _render_code_block_png(lines, label="Plain text"):
+    """Draw a ChatGPT-style code block: gray rounded box, header, mono text."""
+    if Image is None or ImageDraw is None or ImageFont is None:
+        return b""
+    mono_paths = (
+        r"C:\Windows\Fonts\consola.ttf",
+        "consola.ttf",
+        "DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "LiberationMono-Regular.ttf",
+    )
+    bold_paths = (
+        r"C:\Windows\Fonts\segoeuib.ttf",
+        r"C:\Windows\Fonts\arialbd.ttf",
+        "arialbd.ttf",
+        "DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    )
+    scale = 2  # draw at 2x, then downsample for smooth edges
+    mono = _first_font(mono_paths, 24)
+    try:  # size the font so one character is ~6.4 px wide (ChatGPT's look)
+        em_width = mono.getlength("M") / 24
+        mono = _first_font(mono_paths, max(8.0, 6.4 * scale / em_width))
+    except Exception:
+        pass
+    header_font = _first_font(bold_paths, 15 * scale)
+    lines = [line.replace("\t", "    ").rstrip() for line in lines] or [""]
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    text_width = max(
+        (probe.textlength(line, font=mono) for line in lines), default=0
+    )
+    width = int(max(746 * scale, text_width + 40 * scale))
+    line_height = int(19.3 * scale)
+    header_height = 46 * scale
+    height = header_height + line_height * len(lines) + 24 * scale
+    background = (231, 231, 231)
+    ink = (13, 13, 13)
+
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle(
+        (0, 0, width - 1, height - 1), radius=22 * scale, fill=background
+    )
+    # header: "</>" icon + label
+    draw.text((20 * scale, 22 * scale), "</>", font=mono, fill=ink, anchor="lm")
+    draw.text((45 * scale, 23 * scale), label, font=header_font, fill=ink, anchor="lm")
+    # right icons: wrap-text arrow and copy
+    w = 2 * scale
+    x = width - 62 * scale
+    y = 23 * scale
+    draw.line((x - 8 * scale, y, x + 6 * scale, y), fill=ink, width=w)
+    draw.line((x + 6 * scale, y, x + 6 * scale, y - 5 * scale), fill=ink, width=w)
+    draw.line((x - 8 * scale, y, x - 4 * scale, y - 4 * scale), fill=ink, width=w)
+    draw.line((x - 8 * scale, y, x - 4 * scale, y + 4 * scale), fill=ink, width=w)
+    draw.line((x + 12 * scale, y - 8 * scale, x + 12 * scale, y + 8 * scale), fill=ink, width=w)
+    cx = width - 24 * scale
+    draw.rounded_rectangle(
+        (cx - 4 * scale, y - 9 * scale, cx + 9 * scale, y + 6 * scale),
+        radius=3 * scale, outline=ink, width=w,
+    )
+    draw.rounded_rectangle(
+        (cx - 9 * scale, y - 4 * scale, cx + 4 * scale, y + 10 * scale),
+        radius=3 * scale, outline=ink, fill=background, width=w,
+    )
+    # code text
+    top = header_height + 4 * scale
+    for number, line in enumerate(lines):
+        draw.text((19 * scale, top + number * line_height), line, font=mono, fill=ink)
+
+    image = image.resize((width // scale, height // scale), Image.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _add_code_screenshot(document, png_data):
+    if not png_data:
+        return False
+    width = Inches(6)
+    if Image is not None:
+        try:
+            pixel_width = Image.open(io.BytesIO(png_data)).size[0]
+            # same scale as the table screenshots (774 px -> 6 in)
+            width = Inches(min(6.0, pixel_width * 6.0 / 774))
+        except Exception:
+            width = Inches(6)
+    paragraph = document.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.add_run().add_picture(io.BytesIO(png_data), width=width)
+    return True
+
+
 def _add_table_screenshot(document, rows, screenshot_data=None):
     try:
         png_data = screenshot_data or _render_table_png(rows)
@@ -1744,54 +1936,151 @@ def _add_table_screenshot(document, rows, screenshot_data=None):
     return True
 
 
-def _capture_chatgpt_table_screenshots(url, max_tables=None, cancel_event=None, attempts=3):
+# ChatGPT puts the "Plain text" header bar (language label + copy buttons)
+# OUTSIDE the <pre>, so climb to the wrapper that holds header + code and mark
+# it so the overlay-hiding script leaves it alone.
+_CODE_BLOCK_WRAPPER_JS = """
+const pre = arguments[0];
+const stop = 'p, h1, h2, h3, h4, h5, h6, li, ul, ol, table, blockquote';
+let node = pre;
+for (let i = 0; i < 6; i++) {
+  const parent = node.parentElement;
+  if (!parent || parent.matches('[data-message-author-role], .markdown, main, article, body')) break;
+  if (parent.querySelectorAll('pre').length > 1) break;
+  let foreign = false;
+  for (const other of parent.querySelectorAll(stop)) {
+    if (!pre.contains(other)) { foreign = true; break; }
+  }
+  if (foreign) break;
+  node = parent;
+}
+node.setAttribute('data-capture-keep', '1');
+return node;
+"""
+
+
+def _capture_chatgpt_screenshots(
+    url,
+    want_tables=True,
+    want_code=False,
+    cancel_event=None,
+    attempts=3,
+):
+    """One browser session: returns (table_screenshots, code_screenshots)."""
     if webdriver is None or Options is None or By is None or WebDriverWait is None:
-        return []
+        return [], []
 
     def check_cancel():
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Conversion cancelled.")
+
+    selector = ", ".join(
+        part
+        for part, wanted in (
+            ("table, [role='table']", want_tables),
+            ("pre", want_code),
+        )
+        if wanted
+    )
+    if not selector:
+        return [], []
 
     for _attempt in range(attempts):
         check_cancel()
         driver = webdriver.Chrome(options=_build_chrome_options())
         try:
             driver.get(url)
-            ready = _wait_for_page_content(driver, cancel_event=cancel_event)
-            tables = [
-                table
-                for table in driver.find_elements(By.CSS_SELECTOR, "table")
-                if table.is_displayed()
-            ]
-            if not ready or not tables:
+            ready = _wait_for_page_content(
+                driver,
+                cancel_event=cancel_event,
+                content_selector=selector,
+            )
+            assistant_messages = driver.find_elements(
+                By.CSS_SELECTOR,
+                '[data-message-author-role="assistant"]',
+            )
+            last_message = assistant_messages[-1] if assistant_messages else None
+            tables = (
+                last_message.find_elements(By.CSS_SELECTOR, "table")
+                if last_message is not None and want_tables
+                else []
+            )
+            code_blocks = (
+                last_message.find_elements(By.CSS_SELECTOR, "pre")
+                if last_message is not None and want_code
+                else []
+            )
+            if (
+                not ready
+                or (want_tables and not tables)
+                or (want_code and not code_blocks)
+            ):
                 continue  # page did not hydrate: retry with a fresh browser
 
-            screenshots = []
+            table_screenshots = []
             for table in tables:
                 check_cancel()
                 try:
                     size = table.size
                     if size["width"] < 50 or size["height"] < 30:
                         continue
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView({block: 'center'});", table
-                    )
-                    time.sleep(0.3)
-                    screenshots.append(_element_to_png_bytes(table))
+                    table_screenshots.append(_element_to_png_bytes(driver, table))
                 except RuntimeError:
                     raise
                 except Exception:
-                    continue
-                if max_tables is not None and len(screenshots) >= max_tables:
-                    break
-            if screenshots:
-                return screenshots
+                    table_screenshots.append(None)
+
+            code_screenshots = []
+            code_targets = []
+            for block in code_blocks:
+                try:
+                    code_targets.append(
+                        driver.execute_script(_CODE_BLOCK_WRAPPER_JS, block) or block
+                    )
+                except Exception:
+                    code_targets.append(block)
+            for target in code_targets:
+                check_cancel()
+                try:
+                    size = target.size
+                    if size["width"] < 50 or size["height"] < 15:
+                        code_screenshots.append(None)  # keep order aligned
+                        continue
+                    code_screenshots.append(_element_to_png_bytes(driver, target))
+                except RuntimeError:
+                    raise
+                except Exception:
+                    code_screenshots.append(None)
+
+            if any(table_screenshots) or any(code_screenshots):
+                return table_screenshots, code_screenshots
         finally:
             driver.quit()
-    return []
+    return [], []
 
-def _add_response_text(document, text, images=(), heading_content=(), table_screenshots=()):
+
+def _capture_chatgpt_table_screenshots(url, max_tables=None, cancel_event=None, attempts=3):
+    tables, _code = _capture_chatgpt_screenshots(
+        url,
+        want_tables=True,
+        want_code=False,
+        cancel_event=cancel_event,
+        attempts=attempts,
+    )
+    return tables[:max_tables] if max_tables is not None else tables
+
+
+def _add_response_text(
+    document,
+    text,
+    images=(),
+    heading_content=(),
+    table_screenshots=(),
+    code_screenshots=(),
+):
+    text = _replace_entity_tags(text)
     table_screenshots = list(table_screenshots)
+    code_screenshots = list(code_screenshots)
     images_by_placeholder = {}
     for image in images:
         images_by_placeholder.setdefault(image.placeholder, []).append(image)
@@ -1807,7 +2096,7 @@ def _add_response_text(document, text, images=(), heading_content=(), table_scre
                 if candidate.strip()
             ]
             if suggestions and all(
-                re.match(r"^[-*+]\s+", suggestion)
+                re.match(r"^(?:[-*+]|[·•▪●○‣◦])\s+", suggestion)
                 for suggestion in suggestions
             ):
                 lines = lines[:index]
@@ -1826,6 +2115,25 @@ def _add_response_text(document, text, images=(), heading_content=(), table_scre
         line = lines[index]
         stripped = line.strip()
         if stripped.startswith("```"):
+            if not in_code_block:
+                # Opening fence: screenshot of the plain-text block, if we have one.
+                block_end = index + 1
+                while block_end < len(lines) and not lines[block_end].strip().startswith("```"):
+                    block_end += 1
+                code_screenshot = code_screenshots.pop(0) if code_screenshots else None
+                if (
+                    not code_screenshot
+                    and SCREENSHOT_CODE_BLOCKS
+                    and FALLBACK_RENDER_CODE_BLOCKS
+                ):
+                    code_screenshot = _render_code_block_png(
+                        lines[index + 1 : block_end],
+                        _code_block_label(stripped[3:]),
+                    )
+                if code_screenshot and _add_code_screenshot(document, code_screenshot):
+                    if not KEEP_CODE_TEXT_AFTER_SCREENSHOT:
+                        index = block_end + 1
+                        continue
             in_code_block = not in_code_block
             index += 1
             continue
@@ -1847,6 +2155,9 @@ def _add_response_text(document, text, images=(), heading_content=(), table_scre
                     io.BytesIO(image.data),
                     width=Inches(6),
                 )
+            index += 1
+            continue
+        if re.fullmatch(r"<AsyncImage(?:Group)?\b[^>]*?/?>", stripped):
             index += 1
             continue
         if not stripped:
@@ -1977,7 +2288,7 @@ def _add_response_text(document, text, images=(), heading_content=(), table_scre
 
         heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
         numbered_section_heading = _numbered_section_heading(stripped)
-        bullet = re.match(r"^[-*+]\s+(.+)$", stripped)
+        bullet = re.match(r"^(?:[-*+]|[·•▪●○‣◦])\s+(.+)$", stripped)
         numbered = re.match(r"^\d+[.)]\s+(.+)$", stripped)
         if heading:
             if len(heading.group(1)) == 1 and not main_heading_seen:
@@ -2088,18 +2399,64 @@ def _build_chrome_options():
     return chrome_options
 
 
-def _element_to_png_bytes(element):
-    fd, temp_path = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    try:
-        element.screenshot(temp_path)
-        with open(temp_path, "rb") as screenshot_file:
-            return screenshot_file.read()
-    finally:
-        try:
-            os.remove(temp_path)
-        except FileNotFoundError:
-            pass
+_HIDE_OVERLAYS_JS = """
+for (const el of document.querySelectorAll('body *')) {
+  const pos = getComputedStyle(el).position;
+  if ((pos === 'fixed' || pos === 'sticky')
+      && !el.closest('table, pre, [data-capture-keep]')
+      && !el.querySelector('table, pre, [data-capture-keep]')) {
+    el.style.setProperty('visibility', 'hidden', 'important');
+  }
+}
+"""
+
+
+def _png_is_blank(png_bytes):
+    if Image is None:
+        return False
+    image = Image.open(io.BytesIO(png_bytes)).convert("L")
+    low, high = image.getextrema()
+    return (high - low) < 8
+
+
+def _element_to_png_bytes(driver, element, attempts=3):
+    driver.execute_script(_HIDE_OVERLAYS_JS)
+    for _attempt in range(attempts):
+        height = driver.execute_script(
+            "return Math.ceil(arguments[0].getBoundingClientRect().height);",
+            element,
+        )
+        window_height = driver.execute_script("return window.innerHeight;")
+        if height + 200 > window_height:
+            driver.set_window_size(1600, height + 400)
+
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+            element,
+        )
+        time.sleep(0.8)
+        rect = driver.execute_script(
+            """
+            const r = arguments[0].getBoundingClientRect();
+            return {x: r.left + window.scrollX, y: r.top + window.scrollY,
+                    width: r.width, height: r.height};
+            """,
+            element,
+        )
+        shot = driver.execute_cdp_cmd(
+            "Page.captureScreenshot",
+            {
+                "format": "png",
+                "fromSurface": True,
+                "captureBeyondViewport": False,
+                "clip": {**rect, "scale": 1},
+            },
+        )
+        png = base64.b64decode(shot["data"])
+        if not _png_is_blank(png):
+            return png
+        time.sleep(1.0)
+    return None
 
 
 def _find_best_capture_target(driver, selectors):
@@ -2129,11 +2486,17 @@ def _find_best_capture_target(driver, selectors):
     return best
 
 
-def _wait_for_page_content(driver, cancel_event=None, timeout=90, stable_seconds=3.0):
+def _wait_for_page_content(
+    driver,
+    cancel_event=None,
+    timeout=90,
+    stable_seconds=3.0,
+    content_selector="table, [role='table']",
+):
     script = """
     window.scrollTo(0, document.body.scrollHeight);
     return {
-        tables: document.querySelectorAll("table, [role='table']").length,
+        tables: document.querySelectorAll(arguments[0]).length,
         text: (document.body.innerText || "")
     };
     """
@@ -2144,7 +2507,7 @@ def _wait_for_page_content(driver, cancel_event=None, timeout=90, stable_seconds
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Conversion cancelled.")
         try:
-            result = driver.execute_script(script)
+            result = driver.execute_script(script, content_selector)
         except Exception:
             result = {"tables": 0, "text": ""}
         text = result["text"]
@@ -2238,7 +2601,14 @@ def capture_table_screenshot(url, output_path, selector=None):
     return output_path
 
 
-def save_docx(text, destination, images=(), heading_content=(), table_screenshots=()):
+def save_docx(
+    text,
+    destination,
+    images=(),
+    heading_content=(),
+    table_screenshots=(),
+    code_screenshots=(),
+):
     document = Document()
     _add_response_text(
         document,
@@ -2246,6 +2616,7 @@ def save_docx(text, destination, images=(), heading_content=(), table_screenshot
         images,
         heading_content,
         table_screenshots=table_screenshots,
+        code_screenshots=code_screenshots,
     )
     _apply_document_format(document)
     compatibility = document.settings._element.find(qn("w:compat"))
@@ -2811,17 +3182,33 @@ class ChatGPTToDocxApp:
                 raise RuntimeError("Conversion cancelled.")
 
             table_pattern = r"^\s*\|.+\|\s*$\n^\s*\|?[\s:|-]+\|?\s*$"
-            table_count = len(re.findall(table_pattern, text, re.MULTILINE))
+            table_count = len(
+                re.findall(
+                    table_pattern,
+                    _text_without_code_blocks(text),
+                    re.MULTILINE,
+                )
+            )
+            code_count = (
+                len(_fenced_code_blocks(text)) if SCREENSHOT_CODE_BLOCKS else 0
+            )
             table_screenshots = []
+            code_screenshots = []
 
-            if table_count:
+            if table_count or code_count:
                 self.root.after(
-                    0, self._set_progress, 40, "Capturing table screenshots..."
+                    0,
+                    self._set_progress,
+                    40,
+                    "Capturing table / plain-text screenshots...",
                 )
                 capture_error = None
                 try:
-                    table_screenshots = _capture_chatgpt_table_screenshots(
-                        url, cancel_event=self._cancel_event
+                    table_screenshots, code_screenshots = _capture_chatgpt_screenshots(
+                        url,
+                        want_tables=bool(table_count),
+                        want_code=bool(code_count),
+                        cancel_event=self._cancel_event,
                     )
                 except RuntimeError as screenshot_error:
                     if str(screenshot_error) == "Conversion cancelled.":
@@ -2832,23 +3219,40 @@ class ChatGPTToDocxApp:
 
                 if capture_error is not None:
                     warnings.append(
-                        "Table screenshots failed with an error:\n"
+                        "Screenshots failed with an error:\n"
                         f"{type(capture_error).__name__}: {capture_error}"
                     )
                     table_screenshots = []
-                elif not table_screenshots:
-                    warnings.append(
-                        "Could not capture the table screenshots after 3 attempts "
-                        "(the ChatGPT page did not finish loading, or "
-                        "Selenium/Chrome is not available)."
-                    )
-                elif len(table_screenshots) != table_count:
-                    warnings.append(
-                        f"Captured {len(table_screenshots)} table screenshot(s) "
-                        f"but the reply has {table_count} table(s), so the "
-                        "screenshots were skipped."
-                    )
-                    table_screenshots = []
+                    code_screenshots = []
+                else:
+                    if table_count and not any(table_screenshots):
+                        warnings.append(
+                            "Could not capture the table screenshots after 3 attempts "
+                            "(the ChatGPT page did not finish loading, or "
+                            "Selenium/Chrome is not available)."
+                        )
+                        table_screenshots = []
+                    elif table_count and len(table_screenshots) != table_count:
+                        warnings.append(
+                            f"Captured {len(table_screenshots)} table screenshot(s) "
+                            f"but the reply has {table_count} table(s), so the "
+                            "screenshots were skipped."
+                        )
+                        table_screenshots = []
+                    if code_count and not any(code_screenshots):
+                        warnings.append(
+                            "Could not capture the plain-text (code block) "
+                            "screenshots after 3 attempts; a generated plain-text image "
+                            "was used instead."
+                        )
+                        code_screenshots = []
+                    elif code_count and len(code_screenshots) != code_count:
+                        warnings.append(
+                            f"Captured {len(code_screenshots)} plain-text screenshot(s) "
+                            f"but the reply has {code_count} plain-text block(s), so "
+                            "a generated plain-text image was used instead."
+                        )
+                        code_screenshots = []
 
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
@@ -2863,6 +3267,7 @@ class ChatGPTToDocxApp:
                 images,
                 heading_content,
                 table_screenshots=table_screenshots,
+                code_screenshots=code_screenshots,
             )
         except RuntimeError as error:
             if str(error) == "Conversion cancelled.":
@@ -2904,12 +3309,12 @@ class ChatGPTToDocxApp:
         if warnings:
             self.status.configure(text=f"Saved with warnings: {destination}")
             messagebox.showwarning(
-                "Saved, but table screenshots are missing",
+                "Saved, but some screenshots are missing",
                 "Word document saved to:\n"
                 f"{destination}\n\n"
                 + "\n\n".join(warnings)
-                + "\n\nThe tables were still built from the text, but without "
-                "the screenshot images. Try converting again if you need them.",
+                + "\n\nThe content was still built from the text, but without "
+                "the missing screenshot images. Try converting again if you need them.",
             )
         else:
             self.status.configure(text=f"Saved: {destination}")
