@@ -1,9 +1,11 @@
 import base64
 import ctypes
+import html
 import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -74,10 +76,144 @@ KEEP_CODE_TEXT_AFTER_SCREENSHOT = True
 # identical-looking block ("</> Plain text" header, copy icons) with Pillow.
 FALLBACK_RENDER_CODE_BLOCKS = True
 _CONSOLE_CTRL_HANDLER = None
+_CONSOLE_CLOSED_CALLBACK = None
+_ACTIVE_DRIVERS = set()
+_ACTIVE_DRIVERS_LOCK = threading.Lock()
+_JOB_HANDLE = None
+
+
+def _bind_children_to_process_lifetime():
+    """Windows: put this process in a kill-on-close Job Object.
+
+    Every child process started afterwards (chromedriver, headless Chrome) is
+    killed by Windows as soon as this process ends, however it ends.
+    """
+    global _JOB_HANDLE
+    if os.name != "nt" or _JOB_HANDLE is not None:
+        return False
+    try:
+        from ctypes import wintypes
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class BASIC_LIMITS(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class EXTENDED_LIMITS(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BASIC_LIMITS),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        kernel32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ]
+        kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return False
+        limits = EXTENDED_LIMITS()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            return False
+        if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
+            return False
+        _JOB_HANDLE = job  # keep the handle open for the life of the process
+        return True
+    except Exception:
+        return False
+
+
+def _start_chrome_driver():
+    driver = webdriver.Chrome(options=_build_chrome_options())
+    with _ACTIVE_DRIVERS_LOCK:
+        _ACTIVE_DRIVERS.add(driver)
+    return driver
+
+
+def _stop_chrome_driver(driver):
+    with _ACTIVE_DRIVERS_LOCK:
+        _ACTIVE_DRIVERS.discard(driver)
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+
+def _kill_all_chrome_drivers():
+    """Kill every chromedriver/Chrome process this app started."""
+    with _ACTIVE_DRIVERS_LOCK:
+        drivers = list(_ACTIVE_DRIVERS)
+        _ACTIVE_DRIVERS.clear()
+    for driver in drivers:
+        pid = None
+        try:
+            pid = driver.service.process.pid
+        except Exception:
+            pass
+        if pid and os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                    timeout=5,
+                )
+                continue
+            except Exception:
+                pass
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def _force_exit():
+    """Stop all browser processes and end this process completely."""
+    try:
+        _kill_all_chrome_drivers()
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(0)
 
 
 def _install_console_close_handler():
-    """Keep the GUI process alive when the user closes the attached console window."""
+    """Closing the console window only hides it; the GUI keeps running."""
     global _CONSOLE_CTRL_HANDLER
     if os.name != "nt":
         return False
@@ -88,8 +224,19 @@ def _install_console_close_handler():
 
     @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong)
     def _handler(ctrl_type):
-        if ctrl_type == 2:  # CTRL_CLOSE_EVENT
+        if ctrl_type == 2:  # CTRL_CLOSE_EVENT: user clicked X on the console
+            # Detach from the console so Windows closes only the console
+            # window and keeps this GUI process alive (console is "hidden").
+            hide_program_console()
+            callback = _CONSOLE_CLOSED_CALLBACK
+            if callback is not None:
+                try:
+                    callback()
+                except Exception:
+                    pass
             return 1
+        if ctrl_type in (5, 6):  # LOGOFF / SHUTDOWN
+            _force_exit()
         return 0
 
     try:
@@ -919,6 +1066,15 @@ def _clean_inline_text(text):
         text,
         flags=re.IGNORECASE,
     )
+    # <Link ref="turn123search0" title="Wolfram MathWorld"/>  ->  Wolfram MathWorld
+    text = re.sub(
+        r'<Link\b[^>]*?\btitle\s*=\s*"([^"]*)"[^>]*?/?>(?:\s*</Link>)?',
+        lambda match: html.unescape(match.group(1)),
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Any leftover <Link .../> or </Link> with no title
+    text = re.sub(r"</?Link\b[^>]*>", "", text, flags=re.IGNORECASE)
     text = re.sub(
         "\ue200url\ue202(.*?)\ue202.*?\ue201",
         r"\1",
@@ -1987,7 +2143,7 @@ def _capture_chatgpt_screenshots(
 
     for _attempt in range(attempts):
         check_cancel()
-        driver = webdriver.Chrome(options=_build_chrome_options())
+        driver = _start_chrome_driver()
         try:
             driver.get(url)
             ready = _wait_for_page_content(
@@ -2055,7 +2211,7 @@ def _capture_chatgpt_screenshots(
             if any(table_screenshots) or any(code_screenshots):
                 return table_screenshots, code_screenshots
         finally:
-            driver.quit()
+            _stop_chrome_driver(driver)
     return [], []
 
 
@@ -2580,7 +2736,7 @@ def capture_table_screenshot(url, output_path, selector=None):
     ]
     candidate_selectors = [item for item in candidate_selectors if item]
 
-    driver = webdriver.Chrome(options=_build_chrome_options())
+    driver = _start_chrome_driver()
     try:
         driver.get(url)
         WebDriverWait(driver, 20).until(
@@ -2619,7 +2775,7 @@ def capture_table_screenshot(url, output_path, selector=None):
         )
         target.screenshot(str(output_path))
     finally:
-        driver.quit()
+        _stop_chrome_driver(driver)
 
     return output_path
 
@@ -2704,7 +2860,9 @@ class ChatGPTToDocxApp:
         self._tray_started = False
         root.title("ChatGPT to Word")
         root.minsize(680, 500)
-        root.protocol("WM_DELETE_WINDOW", self.hide_window)
+        root.protocol("WM_DELETE_WINDOW", self.exit_app)
+        global _CONSOLE_CLOSED_CALLBACK
+        _CONSOLE_CLOSED_CALLBACK = self._on_console_closed
 
         frame = ttk.Frame(root, padding=16)
         frame.grid(sticky="nsew")
@@ -2934,8 +3092,20 @@ class ChatGPTToDocxApp:
             self._tray_started = False
             self.status.configure(text="Window restored.")
 
+    def _on_console_closed(self):
+        # Called when the user clicks X on the console window.
+        self.console_visible = False
+
     def exit_app(self):
-        self.save_state()
+        """Fully quit: stop work, close Chrome, remove tray icon, end the process."""
+        try:
+            self._cancel_event.set()
+        except Exception:
+            pass
+        try:
+            self.save_state()
+        except Exception:
+            pass
         if self.tray_icon is not None:
             try:
                 self.tray_icon.stop()
@@ -2943,7 +3113,11 @@ class ChatGPTToDocxApp:
                 pass
             self.tray_icon = None
         self._tray_started = False
-        self.root.destroy()
+        try:
+            hide_program_console()
+        except Exception:
+            pass
+        _force_exit()
 
     def clear_pasted_text(self):
         self.pasted_text.delete("1.0", "end")
@@ -3347,9 +3521,11 @@ class ChatGPTToDocxApp:
             )
 
 def main():
+    _bind_children_to_process_lifetime()
     root = tk.Tk()
     ChatGPTToDocxApp(root)
     root.mainloop()
+    _force_exit()
 
 
 if __name__ == "__main__":
