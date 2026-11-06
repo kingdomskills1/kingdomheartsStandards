@@ -1051,11 +1051,98 @@ def _normalize_image_placeholders(text):
     )
 
 
+# ChatGPT "widget" elements, e.g.
+#   <title size="xl" color="default" tabularNums>6</title>
+#   <text color="secondary" size="xs">Four equal sides and four 90° angles.</text>
+# Only matched when they carry at least one attribute, so plain prose that
+# mentions <text> or <title> is left alone.
+_WIDGET_TEXT_RE = re.compile(
+    r"<(title|text)(\s+[^<>]*?)\s*>(.*?)</\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_LAYOUT_TAG_RE = re.compile(r"</?(?:box|row|divider|grid-item|grid)\b[^>]*?/?>", re.IGNORECASE)
+_WIDGET_SIZES_PT = {
+    "title": {"xs": 11, "sm": 12, "md": 14, "lg": 16, "xl": 20, "2xl": 24, "3xl": 28},
+    "text": {"xs": 9, "sm": 10, "md": 12, "lg": 14, "xl": 16},
+}
+_WIDGET_DEFAULT_SIZE_PT = {"title": 14, "text": 12}
+_WIDGET_COLORS = {
+    "secondary": RGBColor(0x6B, 0x6B, 0x6B),
+    "tertiary": RGBColor(0x8E, 0x8E, 0x8E),
+}
+
+
+def _widget_attribute(attributes, name):
+    match = re.search(
+        r"(?<![\w-])" + name + r"\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+        attributes,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    for group in match.groups():
+        if group is not None:
+            return group
+    return None
+
+
+def _normalize_widget_text_segment(text):
+    if not _WIDGET_TEXT_RE.search(text):
+        return text
+    # an element that wraps over several lines becomes a single line
+    text = _WIDGET_TEXT_RE.sub(
+        lambda match: re.sub(r"\s*\n\s*", " ", match.group(0)),
+        text,
+    )
+    lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        remainder = _LAYOUT_TAG_RE.sub("", _WIDGET_TEXT_RE.sub("", stripped)).strip()
+        if stripped and _WIDGET_TEXT_RE.search(stripped) and not remainder:
+            # a line holding only widget elements (and <box>/<row> tags):
+            # put every element on its own line
+            lines.extend(match.group(0) for match in _WIDGET_TEXT_RE.finditer(stripped))
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _normalize_widget_text(text):
+    """Make every <title ...>/<text ...> widget element its own single line.
+
+    Fenced code blocks are left untouched.
+    """
+    parts = re.split(r"(```.*?```)", text, flags=re.DOTALL)
+    for position in range(0, len(parts), 2):
+        parts[position] = _normalize_widget_text_segment(parts[position])
+    return "".join(parts)
+
+
+def _add_widget_text(document, kind, attributes, inner):
+    kind = kind.lower()
+    is_title = kind == "title"
+    size_name = (_widget_attribute(attributes, "size") or "").lower()
+    color_name = (_widget_attribute(attributes, "color") or "").lower()
+    size_pt = _WIDGET_SIZES_PT[kind].get(size_name, _WIDGET_DEFAULT_SIZE_PT[kind])
+    color = _WIDGET_COLORS.get(color_name)
+    paragraph = document.add_paragraph()
+    _add_inline_runs(paragraph, inner.strip(), bold=is_title)
+    for run in paragraph.runs:
+        run.font.size = Pt(size_pt)
+        if color is not None:
+            run.font.color.rgb = color
+    paragraph.paragraph_format.space_before = Pt(6) if is_title else Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0) if is_title else Pt(8)
+    paragraph.paragraph_format.keep_with_next = is_title
+    return paragraph
+
+
 def _clean_inline_text(text):
     text = _replace_entity_tags(text)
     text = _IMAGE_PLACEHOLDER_RE.sub("", text)
+    text = _WIDGET_TEXT_RE.sub(lambda match: match.group(3) + " ", text)
     text = re.sub(
-        r"</?(?:box|row|divider)\b[^>]*?/?>",
+        r"</?(?:box|row|divider|grid-item|grid)\b[^>]*?/?>",
         "",
         text,
         flags=re.IGNORECASE,
@@ -1236,6 +1323,25 @@ class _MathParser:
         "Phi": "Φ",
         "omega": "ω",
         "Omega": "Ω",
+        "epsilon": "ϵ",
+        "varepsilon": "ε",
+        "zeta": "ζ",
+        "eta": "η",
+        "vartheta": "ϑ",
+        "iota": "ι",
+        "kappa": "κ",
+        "nu": "ν",
+        "xi": "ξ",
+        "Xi": "Ξ",
+        "varrho": "ϱ",
+        "varsigma": "ς",
+        "tau": "τ",
+        "upsilon": "υ",
+        "Upsilon": "Υ",
+        "varphi": "φ",
+        "chi": "χ",
+        "psi": "ψ",
+        "Psi": "Ψ",
         "cdot": "·",
         "cdots": "⋯",
         "dots": "…",
@@ -1278,6 +1384,14 @@ class _MathParser:
         "angle": "∠",
         "perp": "⊥",
         "vert": "|",
+        "mid": "\u2223",
+        "nmid": "\u2224",
+        ",": "\u2009",
+        ";": "\u2004",
+        ":": "\u2005",
+        ">": "\u2005",
+        " ": "\u00a0",
+        "!": "",
         "lvert": "|",
         "rvert": "|",
         "{": "{",
@@ -1290,11 +1404,7 @@ class _MathParser:
     }
 
     def __init__(self, expression):
-        self.tokens = re.findall(
-            r"\\[A-Za-z]+|\\.|[A-Za-z]+|\d+(?:\.\d+)?|"
-            r"\s+|.",
-            expression,
-        )
+        self.tokens = re.findall(self.TOKEN_RE, expression)
         self.position = 0
 
     def _group(self, preserve_whitespace=False):
@@ -1309,13 +1419,23 @@ class _MathParser:
             return container
         return self._atom()
 
+    TOKEN_RE = (
+        r"\\[A-Za-z]+|\\.|[A-Za-z]+|\d+(?:\.\d+)?|"
+        r"\s+|."
+    )
+
     def _fraction_argument(self):
         while self.position < len(self.tokens) and self.tokens[self.position].isspace():
             self.position += 1
         if self.position < len(self.tokens):
             token = self.tokens[self.position]
-            if re.fullmatch(r"\d{2,}", token):
-                self.tokens[self.position] = token[1:]
+            # TeX: an unbraced \frac argument is ONE character, so
+            # \frac52.3 is 5/2 followed by ".3" and \frac ab is a/b.
+            if token[0].isalnum():
+                rest = token[1:]
+                self.tokens[self.position : self.position + 1] = re.findall(
+                    self.TOKEN_RE, rest
+                )
                 return _math_run(token[0])
         return self._group()
 
@@ -1587,7 +1707,7 @@ def _next_content_is_subheading(lines, start_index, heading_level):
             not stripped
             or re.match(r"^(---+|___+|\*\*\*+)\s*$", stripped)
             or re.fullmatch(
-                r"</?(?:box|row|divider)\b[^>]*?/?>",
+                r"</?(?:box|row|divider|grid-item|grid)\b[^>]*?/?>",
                 stripped,
                 re.IGNORECASE,
             )
@@ -2251,6 +2371,7 @@ def _add_response_text(
     code_screenshots=(),
 ):
     text = _replace_entity_tags(text)
+    text = _normalize_widget_text(text)
     table_screenshots = list(table_screenshots)
     code_screenshots = list(code_screenshots)
     images_by_placeholder = {}
@@ -2336,7 +2457,11 @@ def _add_response_text(
         if not stripped:
             index += 1
             continue
-        if re.fullmatch(r"</?(?:box|row|divider)\b[^>]*?/?>", stripped, re.IGNORECASE):
+        if re.fullmatch(
+            r"(?:</?(?:box|row|divider|grid-item|grid)\b[^>]*?/?>\s*)+",
+            stripped,
+            re.IGNORECASE,
+        ):
             index += 1
             continue
         if in_code_block:
@@ -2355,6 +2480,16 @@ def _add_response_text(
         if main_heading_image_window and not source_metadata_line:
             main_heading_image_window = False
 
+        widget = _WIDGET_TEXT_RE.fullmatch(stripped)
+        if widget:
+            _add_widget_text(
+                document,
+                widget.group(1),
+                widget.group(2),
+                widget.group(3),
+            )
+            index += 1
+            continue
         if re.match(r"^(---+|___+|\*\*\*+)\s*$", stripped):
             index += 1
             continue
