@@ -1057,7 +1057,7 @@ def _normalize_image_placeholders(text):
 # Only matched when they carry at least one attribute, so plain prose that
 # mentions <text> or <title> is left alone.
 _WIDGET_TEXT_RE = re.compile(
-    r"<(title|text)(\s+[^<>]*?)\s*>(.*?)</\1\s*>",
+    r"<(title|text|badge)(\s+[^<>]*?)\s*>(.*?)</\1\s*>",
     re.IGNORECASE | re.DOTALL,
 )
 _LAYOUT_TAG_RE = re.compile(r"</?(?:box|row|divider|grid-item|grid)\b[^>]*?/?>", re.IGNORECASE)
@@ -1118,8 +1118,39 @@ def _normalize_widget_text(text):
     return "".join(parts)
 
 
+_BADGE_STYLES = {  # color name -> (text color, background fill)
+    "success": ("1B7F3B", "DFF5E6"),
+    "danger": ("B42318", "FDE7E6"),
+    "error": ("B42318", "FDE7E6"),
+    "warning": ("B54708", "FEF0C7"),
+    "caution": ("B54708", "FEF0C7"),
+    "info": ("175CD3", "E1EDFF"),
+    "primary": ("175CD3", "E1EDFF"),
+    "secondary": ("475467", "EAECF0"),
+}
+
+
+def _add_badge(document, attributes, inner):
+    color_name = (_widget_attribute(attributes, "color") or "").lower()
+    text_color, fill = _BADGE_STYLES.get(color_name, _BADGE_STYLES["secondary"])
+    paragraph = document.add_paragraph()
+    _add_inline_runs(paragraph, inner.strip(), bold=True)
+    for run in paragraph.runs:
+        run.font.size = Pt(10)
+        run.font.color.rgb = RGBColor.from_string(text_color)
+        shading = OxmlElement("w:shd")
+        shading.set(qn("w:val"), "clear")
+        shading.set(qn("w:color"), "auto")
+        shading.set(qn("w:fill"), fill)
+        run._r.get_or_add_rPr().append(shading)
+    paragraph.paragraph_format.space_after = Pt(6)
+    return paragraph
+
+
 def _add_widget_text(document, kind, attributes, inner):
     kind = kind.lower()
+    if kind == "badge":
+        return _add_badge(document, attributes, inner)
     is_title = kind == "title"
     size_name = (_widget_attribute(attributes, "size") or "").lower()
     color_name = (_widget_attribute(attributes, "color") or "").lower()
@@ -1140,7 +1171,15 @@ def _add_widget_text(document, kind, attributes, inner):
 def _clean_inline_text(text):
     text = _replace_entity_tags(text)
     text = _IMAGE_PLACEHOLDER_RE.sub("", text)
-    text = _WIDGET_TEXT_RE.sub(lambda match: match.group(3) + " ", text)
+    text = _WIDGET_TEXT_RE.sub(
+        lambda match: match.group(3)
+        + (
+            ""
+            if match.end() >= len(match.string) or match.string[match.end()].isspace()
+            else " "
+        ),
+        text,
+    )
     text = re.sub(
         r"</?(?:box|row|divider|grid-item|grid)\b[^>]*?/?>",
         "",
@@ -1385,6 +1424,57 @@ class _MathParser:
         "perp": "⊥",
         "vert": "|",
         "mid": "\u2223",
+        "subset": "⊂",
+        "supset": "⊃",
+        "subseteq": "⊆",
+        "supseteq": "⊇",
+        "subsetneq": "⊊",
+        "supsetneq": "⊋",
+        "cup": "∪",
+        "cap": "∩",
+        "setminus": "∖",
+        "emptyset": "∅",
+        "varnothing": "∅",
+        "ni": "∋",
+        "forall": "∀",
+        "exists": "∃",
+        "neg": "¬",
+        "lnot": "¬",
+        "land": "∧",
+        "wedge": "∧",
+        "lor": "∨",
+        "vee": "∨",
+        "cong": "≅",
+        "sim": "∼",
+        "propto": "∝",
+        "mp": "∓",
+        "ast": "∗",
+        "star": "⋆",
+        "bullet": "∙",
+        "oplus": "⊕",
+        "otimes": "⊗",
+        "partial": "∂",
+        "nabla": "∇",
+        "hbar": "ℏ",
+        "aleph": "ℵ",
+        "prime": "′",
+        "Rightarrow": "⇒",
+        "Leftarrow": "⇐",
+        "Leftrightarrow": "⇔",
+        "leftrightarrow": "↔",
+        "mapsto": "↦",
+        "implies": "⟹",
+        "iff": "⟺",
+        "langle": "⟨",
+        "rangle": "⟩",
+        "lceil": "⌈",
+        "rceil": "⌉",
+        "lfloor": "⌊",
+        "rfloor": "⌋",
+        "therefore": "∴",
+        "because": "∵",
+        "ll": "≪",
+        "gg": "≫",
         "nmid": "\u2224",
         ",": "\u2009",
         ";": "\u2004",
@@ -1499,6 +1589,31 @@ class _MathParser:
                 _append_script_content(expression, content)
                 border_box.append(expression)
                 return border_box
+            if command == "operatorname":
+                if self.position < len(self.tokens) and self.tokens[self.position] == "*":
+                    self.position += 1
+                content = self._group()
+                math_namespace = (
+                    "http://schemas.openxmlformats.org/officeDocument/2006/math"
+                )
+                children = list(content)
+                if children and all(
+                    child.tag == f"{{{math_namespace}}}r" for child in children
+                ):
+                    # operator names are upright text: one plain-style run
+                    name = "".join(
+                        text.text or ""
+                        for child in children
+                        for text in child.iter(f"{{{math_namespace}}}t")
+                    )
+                    run = _math_run(name)
+                    properties = _math_element("rPr")
+                    style = _math_element("sty")
+                    style.set(f"{{{math_namespace}}}val", "p")
+                    properties.append(style)
+                    run.insert(0, properties)
+                    return run
+                return content
             if command == "mathbf":
                 content = self._group()
                 math_namespace = (
