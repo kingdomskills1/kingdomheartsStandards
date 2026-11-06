@@ -1319,24 +1319,85 @@ def _append_script_content(container, argument):
         container.append(argument)
 
 
+_MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+# A big operator's body ends at a relation / separator / binary +,- (outside
+# of brackets), so  \sum_i \lambda_i P_i = 1  puts "lambda_i P_i" in the body.
+_NARY_STOP_CHARS = "=+-\u2212<>,;:|\u2223)]}\u27e9\u2264\u2265\u2260\u2208\u2209\u2282\u2286\u2283\u2287\u2192\u21d2\u21d4\u2194\u223c\u2248\u2261\u2225\u2227\u2228\u222a\u2229"
+
+
+def _math_run_text(node):
+    if not node.tag.endswith("}r"):
+        return None
+    return "".join(t.text or "" for t in node.iter(f"{{{_MATH_NS}}}t"))
+
+
 def _merge_nary_bodies(nodes):
     merged = []
     index = 0
     while index < len(nodes):
         node = nodes[index]
-        merged.append(node)
-        if (
-            node.tag.endswith("}nary")
-            and node.find("{http://schemas.openxmlformats.org/officeDocument/2006/math}e") is None
-            and index + 1 < len(nodes)
-        ):
-            body = _math_element("e")
-            _append_script_content(body, nodes[index + 1])
-            node.append(body)
-            index += 2
-            continue
         index += 1
+        merged.append(node)
+        if not (
+            node.tag.endswith("}nary")
+            and node.find(f"{{{_MATH_NS}}}e") is None
+        ):
+            continue
+        body_nodes = []
+        depth = 0
+        while index < len(nodes):
+            candidate = nodes[index]
+            text = _math_run_text(candidate)
+            if text is not None and text != "":
+                if len(text) == 1 and text in "([\u27e8":
+                    depth += 1
+                elif len(text) == 1 and text in ")]\u27e9" and depth > 0:
+                    depth -= 1
+                elif depth == 0 and (
+                    text.strip() == ""
+                    or (len(text) == 1 and text in _NARY_STOP_CHARS)
+                ):
+                    break
+            body_nodes.append(candidate)
+            index += 1
+        if body_nodes:
+            body = _math_element("e")
+            for body_node in _merge_nary_bodies(body_nodes):
+                _append_script_content(body, body_node)
+            node.append(body)
     return merged
+
+
+def _normalize_nary(math):
+    """Give every n-ary operator the full  properties/sub/sup/e  shape.
+
+    OMML requires sub, sup and e on m:nary. When a limit is missing, hide it
+    explicitly; otherwise Word shows an empty dotted placeholder box.
+    """
+    for nary in list(math.iter(f"{{{_MATH_NS}}}nary")):
+        props = nary.find(f"{{{_MATH_NS}}}naryPr")
+        if props is None:
+            props = _math_element("naryPr")
+        parts = {}
+        for name in ("sub", "sup", "e"):
+            parts[name] = nary.find(f"{{{_MATH_NS}}}{name}")
+        for name, hide in (("sub", "subHide"), ("sup", "supHide")):
+            if parts[name] is None:
+                parts[name] = _math_element(name)
+                if props.find(f"{{{_MATH_NS}}}{hide}") is None:
+                    flag = _math_element(hide)
+                    flag.set(f"{{{_MATH_NS}}}val", "1")
+                    control = props.find(f"{{{_MATH_NS}}}ctrlPr")
+                    if control is not None:
+                        control.addprevious(flag)
+                    else:
+                        props.append(flag)
+        if parts["e"] is None:
+            parts["e"] = _math_element("e")
+        for child in list(nary):
+            nary.remove(child)
+        for child in (props, parts["sub"], parts["sup"], parts["e"]):
+            nary.append(child)
 
 
 class _MathParser:
@@ -1476,6 +1537,19 @@ class _MathParser:
         "ll": "≪",
         "gg": "≫",
         "nmid": "\u2224",
+        "bigcap": "\u22c2",
+        "bigcup": "\u22c3",
+        "bigvee": "\u22c1",
+        "bigwedge": "\u22c0",
+        "bigoplus": "\u2a01",
+        "bigotimes": "\u2a02",
+        "coprod": "\u2210",
+        "lVert": "\u2016",
+        "rVert": "\u2016",
+        "Vert": "\u2016",
+        "|": "\u2016",
+        "lbrace": "{",
+        "rbrace": "}",
         ",": "\u2009",
         ";": "\u2004",
         ":": "\u2005",
@@ -1491,6 +1565,11 @@ class _MathParser:
         "#": "#",
         "$": "$",
         "&": "&",
+    }
+
+    NARY_COMMANDS = {
+        "sum", "prod", "int", "bigcap", "bigcup", "bigvee", "bigwedge",
+        "bigoplus", "bigotimes", "coprod",
     }
 
     def __init__(self, expression):
@@ -1513,6 +1592,52 @@ class _MathParser:
         r"\\[A-Za-z]+|\\.|[A-Za-z]+|\d+(?:\.\d+)?|"
         r"\s+|."
     )
+
+    def _read_delimiter(self):
+        while self.position < len(self.tokens) and self.tokens[self.position].isspace():
+            self.position += 1
+        if self.position >= len(self.tokens):
+            return ""
+        delimiter = self.tokens[self.position]
+        self.position += 1
+        if delimiter in {".", "\\."}:
+            return ""
+        if delimiter.startswith("\\"):
+            return self.COMMANDS.get(delimiter[1:], delimiter[1:])
+        return delimiter
+
+    def _script_argument(self):
+        # TeX: an unbraced sub/superscript is ONE character, so
+        # \lambda_iP_i is lambda_i followed by P_i (not lambda_{iP}).
+        while self.position < len(self.tokens) and self.tokens[self.position].isspace():
+            self.position += 1
+        if self.position < len(self.tokens):
+            token = self.tokens[self.position]
+            if len(token) > 1 and token.isalpha():
+                self.tokens[self.position : self.position + 1] = re.findall(
+                    self.TOKEN_RE, token[1:]
+                )
+                return _math_run(token[0])
+        return self._group()
+
+    def _stacked_rows(self):
+        while self.position < len(self.tokens) and self.tokens[self.position].isspace():
+            self.position += 1
+        if not (self.position < len(self.tokens) and self.tokens[self.position] == "{"):
+            return [[self._group()]]
+        self.position += 1
+        rows = []
+        while True:
+            rows.append(_merge_nary_bodies(self._sequence({"}", "\\\\"})))
+            if self.position >= len(self.tokens):
+                break
+            token = self.tokens[self.position]
+            self.position += 1
+            if token == "}":
+                break
+        while len(rows) > 1 and not rows[-1]:
+            rows.pop()
+        return rows
 
     def _fraction_argument(self):
         while self.position < len(self.tokens) and self.tokens[self.position].isspace():
@@ -1540,7 +1665,62 @@ class _MathParser:
 
         if token.startswith("\\"):
             command = token[1:]
-            if command in {"left", "right"}:
+            if command == "left":
+                begin_char = self._read_delimiter()
+                parts = [_merge_nary_bodies(self._sequence({"\\right", "\\middle"}))]
+                separator_char = None
+                end_char = ""
+                while self.position < len(self.tokens):
+                    closing_token = self.tokens[self.position]
+                    self.position += 1
+                    if closing_token == "\\middle":
+                        found = self._read_delimiter()
+                        if separator_char is None:
+                            separator_char = found
+                        parts.append(
+                            _merge_nary_bodies(
+                                self._sequence({"\\right", "\\middle"})
+                            )
+                        )
+                    else:
+                        end_char = self._read_delimiter()
+                        break
+                delimiter_node = _math_element("d")
+                properties = _math_element("dPr")
+                for tag, value in (
+                    ("begChr", begin_char),
+                    ("sepChr", separator_char),
+                    ("endChr", end_char),
+                ):
+                    if value is None:
+                        continue
+                    char_node = _math_element(tag)
+                    char_node.set(f"{{{_MATH_NS}}}val", value)
+                    properties.append(char_node)
+                properties.append(_math_ctrl_pr())
+                delimiter_node.append(properties)
+                for part_nodes in parts:
+                    part = _math_element("e")
+                    for part_node in part_nodes:
+                        _append_script_content(part, part_node)
+                    delimiter_node.append(part)
+                return delimiter_node
+            if command == "substack":
+                rows = self._stacked_rows()
+                array = _math_element("eqArr")
+                properties = _math_element("eqArrPr")
+                base_justify = _math_element("baseJc")
+                base_justify.set(f"{{{_MATH_NS}}}val", "center")
+                properties.append(base_justify)
+                properties.append(_math_ctrl_pr())
+                array.append(properties)
+                for row_nodes in rows:
+                    row = _math_element("e")
+                    for row_node in row_nodes:
+                        _append_script_content(row, row_node)
+                    array.append(row)
+                return array
+            if command in {"left", "right", "middle"}:
                 if self.position < len(self.tokens):
                     delimiter = self.tokens[self.position]
                     self.position += 1
@@ -1633,9 +1813,18 @@ class _MathParser:
                         "b",
                     )
                 return content
-            if command in {"text", "mathrm"}:
-                return self._group(preserve_whitespace=command == "text")
-            if command in {"sum", "prod", "int"}:
+            if command == "text":
+                content = self._group(preserve_whitespace=True)
+                for run in content.iter(f"{{{_MATH_NS}}}r"):
+                    run_properties = run.find(f"{{{_MATH_NS}}}rPr")
+                    if run_properties is None:
+                        run_properties = _math_element("rPr")
+                        run.insert(0, run_properties)
+                    run_properties.append(_math_element("nor"))
+                return content
+            if command == "mathrm":
+                return self._group()
+            if command in self.NARY_COMMANDS:
                 nary = _math_element("nary")
                 properties = _math_element("naryPr")
                 symbol = _math_element("chr")
@@ -1656,20 +1845,28 @@ class _MathParser:
             if command in self.COMMANDS:
                 return _math_run(self.COMMANDS[command])
             return _math_run(command)
+        if token == "-":
+            return _math_run("\u2212")
         return _math_run(token)
 
     def _sequence(self, closing=None, preserve_whitespace=False):
+        if closing is None:
+            closings = set()
+        elif isinstance(closing, str):
+            closings = {closing}
+        else:
+            closings = set(closing)
         nodes = []
         while self.position < len(self.tokens):
             token = self.tokens[self.position]
-            if token == closing:
+            if token in closings:
                 break
             if token.isspace() and not preserve_whitespace:
                 self.position += 1
                 continue
             if token in {"^", "_"} and nodes:
                 self.position += 1
-                script = self._group()
+                script = self._script_argument()
                 base = nodes.pop()
                 if base.tag.endswith("}nary"):
                     part = _math_element("sub" if token == "_" else "sup")
@@ -1743,6 +1940,7 @@ class _MathParser:
 
 def _add_math(paragraph, expression, display=False, alignment=None):
     math = _MathParser(expression).parse()
+    _normalize_nary(math)
     if display:
         display_math = _math_element("oMathPara")
         if alignment is not None:
