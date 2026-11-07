@@ -2387,6 +2387,32 @@ def _text_without_code_blocks(text):
     return "\n".join(kept)
 
 
+def _count_markdown_tables(text):
+    """Count tables the same way the document builder will turn them into tables.
+
+    (The old regex let whitespace match across newlines, so a table followed
+    by a blank line and a "---" rule was counted twice.)
+    """
+    lines = _text_without_code_blocks(text).splitlines()
+    count = 0
+    index = 0
+    while index < len(lines):
+        if lines[index].strip().startswith("|") and index + 1 < len(lines):
+            separator = lines[index + 1].strip()
+            if re.match(r"^\|?[\s:|-]+\|?$", separator) and "-" in separator:
+                body_rows = 0
+                while index < len(lines) and lines[index].strip().startswith("|"):
+                    first_cell = lines[index].strip().strip("|").split("|")[0]
+                    if not re.match(r"^\s*:?-+:?\s*$", first_cell):
+                        body_rows += 1
+                    index += 1
+                if body_rows > 1:
+                    count += 1
+                continue
+        index += 1
+    return count
+
+
 def _code_block_label(info):
     info = (info or "").strip().split()[0].lower() if (info or "").strip() else ""
     if info in {"", "text", "plaintext", "plain", "txt"}:
@@ -2548,14 +2574,79 @@ return node;
 """
 
 
+class _TableShot:
+    """A table screenshot plus a text signature of the table it came from."""
+
+    __slots__ = ("png", "signature")
+
+    def __init__(self, png, signature=""):
+        self.png = png
+        self.signature = signature
+
+    def __bool__(self):
+        return bool(self.png)
+
+
+def _table_signature(text):
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+def _dom_table_signature(driver, table):
+    """First-column text of every row of a table on the ChatGPT page."""
+    try:
+        text = driver.execute_script(
+            "return Array.from(arguments[0].querySelectorAll('tr'))"
+            ".map(r => r.children.length ? r.children[0].innerText.trim() : '')"
+            ".join(' ');",
+            table,
+        )
+    except Exception:
+        text = ""
+    return _table_signature(text)
+
+
+def _rows_signature(rows):
+    return _table_signature(" ".join(row[0] for row in rows if row))
+
+
+def _take_table_screenshot(shots, rows):
+    """Pick (and remove) the captured screenshot that belongs to this table.
+
+    Tables are matched by their first-column text instead of by position, so a
+    table that could not be captured no longer shifts every later screenshot
+    or throws all of them away.
+    """
+    if not shots:
+        return None
+    if any(not hasattr(shot, "signature") for shot in shots):
+        shot = shots.pop(0)  # plain bytes: old positional behaviour
+        return getattr(shot, "png", shot)
+    import difflib
+
+    wanted = _rows_signature(rows)
+    best_index, best_ratio = None, 0.0
+    for index, shot in enumerate(shots):
+        if not shot.png or not shot.signature or not wanted:
+            continue
+        ratio = difflib.SequenceMatcher(None, wanted, shot.signature).ratio()
+        if ratio > best_ratio:
+            best_index, best_ratio = index, ratio
+    if best_index is None or best_ratio < 0.92:
+        return None
+    return shots.pop(best_index).png
+
+
 def _capture_chatgpt_screenshots(
     url,
     want_tables=True,
     want_code=False,
     cancel_event=None,
     attempts=3,
+    expected_tables=None,
 ):
     """One browser session: returns (table_screenshots, code_screenshots)."""
+    best = ([], [])
+    best_score = -1
     if webdriver is None or Options is None or By is None or WebDriverWait is None:
         return [], []
 
@@ -2609,15 +2700,18 @@ def _capture_chatgpt_screenshots(
             table_screenshots = []
             for table in tables:
                 check_cancel()
+                signature = _dom_table_signature(driver, table)
                 try:
                     size = table.size
                     if size["width"] < 50 or size["height"] < 30:
                         continue
-                    table_screenshots.append(_element_to_png_bytes(driver, table))
+                    table_screenshots.append(
+                        _TableShot(_element_to_png_bytes(driver, table), signature)
+                    )
                 except RuntimeError:
                     raise
                 except Exception:
-                    table_screenshots.append(None)
+                    table_screenshots.append(_TableShot(None, signature))
 
             code_screenshots = []
             code_targets = []
@@ -2642,10 +2736,16 @@ def _capture_chatgpt_screenshots(
                     code_screenshots.append(None)
 
             if any(table_screenshots) or any(code_screenshots):
-                return table_screenshots, code_screenshots
+                score = sum(1 for shot in table_screenshots if shot)
+                if score > best_score:
+                    best, best_score = (table_screenshots, code_screenshots), score
+                if not expected_tables or score >= expected_tables:
+                    return table_screenshots, code_screenshots
+                # fewer tables than the reply text has: the page may not have
+                # finished rendering, so try again with a fresh browser
         finally:
             _stop_chrome_driver(driver)
-    return [], []
+    return best
 
 
 def _capture_chatgpt_table_screenshots(url, max_tables=None, cancel_event=None, attempts=3):
@@ -2687,6 +2787,7 @@ def _add_response_text(
     text = _normalize_widget_text(text)
     table_screenshots = list(table_screenshots)
     code_screenshots = list(code_screenshots)
+    had_table_screenshots = any(table_screenshots)
     images_by_placeholder = {}
     for image in images:
         images_by_placeholder.setdefault(image.placeholder, []).append(image)
@@ -2806,6 +2907,11 @@ def _add_response_text(
         if re.match(r"^(---+|___+|\*\*\*+)\s*$", stripped):
             index += 1
             continue
+        if re.fullmatch(r"<[A-Z][A-Za-z0-9]*(?:\s[^<>]*)?/>", stripped):
+            # interactive ChatGPT component (e.g. <LearningViz .../>): it has
+            # no Word equivalent, so it must not leak into the document as text
+            index += 1
+            continue
         if stripped in {r"\[", "$$"}:
             closing = r"\]" if stripped == r"\[" else "$$"
             equation_lines = []
@@ -2835,9 +2941,13 @@ def _add_response_text(
                         rows.append(cells)
                     index += 1
                 if len(rows) > 1:
-                    screenshot_data = table_screenshots.pop(0) if table_screenshots else None
+                    screenshot_data = _take_table_screenshot(table_screenshots, rows)
                     if screenshot_data:
                         _add_table_screenshot(document, rows, screenshot_data)
+                    elif had_table_screenshots:
+                        # this table was not captured from the page: draw it
+                        # from the text so every table still gets its image
+                        _add_table_screenshot(document, rows, None)
                     table = document.add_table(
                         rows=len(rows),
                         cols=max(len(row) for row in rows),
@@ -3703,42 +3813,77 @@ class ChatGPTToDocxApp:
             self.destination_entry.delete(0, tk.END)
             self.destination_entry.insert(0, destination)
 
-    def show_error_dialog(self, error):
-        error_text = f"{type(error).__name__}: {error}"
+    def _show_copy_dialog(self, title, heading, body, copy_text=None):
+        """Dialog with selectable text and a Copy button (errors and warnings)."""
+        copy_text = body if copy_text is None else copy_text
         dialog = tk.Toplevel(self.root)
-        dialog.title("Could not convert link")
+        dialog.title(title)
         dialog.transient(self.root)
-        dialog.resizable(False, False)
+        dialog.minsize(480, 220)
 
         frame = ttk.Frame(dialog, padding=16)
         frame.grid(sticky="nsew")
-        ttk.Label(
-            frame,
-            text="The conversion failed. Copy the error below if you need help:",
-            wraplength=420,
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        details = tk.Text(frame, width=58, height=5, wrap="word")
-        details.insert("1.0", error_text)
-        details.configure(state="disabled")
-        details.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        ttk.Label(frame, text=heading, wraplength=520).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
+        box = ttk.Frame(frame)
+        box.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(0, 12))
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        details = tk.Text(box, width=70, height=12, wrap="word")
+        scrollbar = ttk.Scrollbar(box, orient="vertical", command=details.yview)
+        details.configure(yscrollcommand=scrollbar.set)
+        details.insert("1.0", body)
+        details.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
 
-        def copy_error():
+        def copy_text_to_clipboard():
             self.root.clipboard_clear()
-            self.root.clipboard_append(error_text)
+            self.root.clipboard_append(copy_text)
             self.root.update()
-            dialog.destroy()
-            self.status.configure(text="Error copied to clipboard.")
+            copy_button.configure(text="Copied!")
+            self.status.configure(text="Copied to clipboard.")
 
-        ttk.Button(frame, text="Copy error", command=copy_error).grid(
-            row=2, column=0, sticky="e", padx=(0, 8)
-        )
+        copy_button = ttk.Button(frame, text="Copy error", command=copy_text_to_clipboard)
+        copy_button.grid(row=2, column=1, sticky="e", padx=(0, 8))
         ttk.Button(frame, text="Close", command=dialog.destroy).grid(
-            row=2, column=1, sticky="e"
+            row=2, column=2, sticky="e"
         )
+        # keep the text selectable (Ctrl+C works) but not editable
+        details.bind("<Key>", lambda event: None if event.state & 0x4 else "break")
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
-        dialog.bind("<Return>", lambda _event: dialog.destroy())
         dialog.grab_set()
         dialog.focus_set()
+
+    def show_error_dialog(self, error):
+        import traceback
+
+        error_text = f"{type(error).__name__}: {error}"
+        full_text = error_text
+        if getattr(error, "__traceback__", None) is not None:
+            full_text = "".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            ).strip()
+        self._show_copy_dialog(
+            "Could not convert link",
+            "The conversion failed. Click \"Copy error\" and send it if you need help:",
+            full_text,
+        )
+
+    def show_warning_dialog(self, destination, warnings):
+        message = "\n\n".join(warnings)
+        self._show_copy_dialog(
+            "Saved, but some screenshots are missing",
+            f"Word document saved to:\n{destination}",
+            message
+            + "\n\nThe content was still built from the text, but without "
+            "the missing screenshot images. Try converting again if you need them.",
+            copy_text=f"Saved to: {destination}\n\n{message}",
+        )
 
     def capture_table_from_url(self):
         url = self.capture_url_entry.get().strip()
@@ -3826,14 +3971,7 @@ class ChatGPTToDocxApp:
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
 
-            table_pattern = r"^\s*\|.+\|\s*$\n^\s*\|?[\s:|-]+\|?\s*$"
-            table_count = len(
-                re.findall(
-                    table_pattern,
-                    _text_without_code_blocks(text),
-                    re.MULTILINE,
-                )
-            )
+            table_count = _count_markdown_tables(text)
             code_count = (
                 len(_fenced_code_blocks(text)) if SCREENSHOT_CODE_BLOCKS else 0
             )
@@ -3854,6 +3992,7 @@ class ChatGPTToDocxApp:
                         want_tables=bool(table_count),
                         want_code=bool(code_count),
                         cancel_event=self._cancel_event,
+                        expected_tables=table_count or None,
                     )
                 except RuntimeError as screenshot_error:
                     if str(screenshot_error) == "Conversion cancelled.":
@@ -3877,13 +4016,17 @@ class ChatGPTToDocxApp:
                             "Selenium/Chrome is not available)."
                         )
                         table_screenshots = []
-                    elif table_count and len(table_screenshots) != table_count:
+                    elif table_count and sum(
+                        1 for shot in table_screenshots if shot
+                    ) < table_count:
+                        captured = sum(1 for shot in table_screenshots if shot)
                         warnings.append(
-                            f"Captured {len(table_screenshots)} table screenshot(s) "
-                            f"but the reply has {table_count} table(s), so the "
-                            "screenshots were skipped."
+                            f"Captured {captured} of {table_count} table "
+                            "screenshot(s) from the page. They were matched to "
+                            "their tables by content, and the other "
+                            f"{table_count - captured} table image(s) were drawn "
+                            "from the text instead."
                         )
-                        table_screenshots = []
                     if code_count and not any(code_screenshots):
                         warnings.append(
                             "Could not capture the plain-text (code block) "
@@ -3953,14 +4096,7 @@ class ChatGPTToDocxApp:
 
         if warnings:
             self.status.configure(text=f"Saved with warnings: {destination}")
-            messagebox.showwarning(
-                "Saved, but some screenshots are missing",
-                "Word document saved to:\n"
-                f"{destination}\n\n"
-                + "\n\n".join(warnings)
-                + "\n\nThe content was still built from the text, but without "
-                "the missing screenshot images. Try converting again if you need them.",
-            )
+            self.show_warning_dialog(destination, warnings)
         else:
             self.status.configure(text=f"Saved: {destination}")
             messagebox.showinfo(
