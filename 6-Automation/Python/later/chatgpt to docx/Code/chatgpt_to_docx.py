@@ -3432,13 +3432,17 @@ class ChatGPTToDocxApp:
         ttk.Label(frame, text="ChatGPT share link:").grid(
             row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 12)
         )
-        self.url_entry = ttk.Entry(frame, width=58)
+        self._save_job = None
+        self._autosave_ready = False
+        self.url_var = tk.StringVar()
+        self.destination_var = tk.StringVar()
+        self.url_entry = ttk.Entry(frame, width=58, textvariable=self.url_var)
         self.url_entry.grid(row=0, column=1, sticky="ew", pady=(0, 12))
 
         ttk.Label(frame, text="Save Word file to:").grid(
             row=1, column=0, sticky="w", padx=(0, 10), pady=(0, 12)
         )
-        self.destination_entry = ttk.Entry(frame)
+        self.destination_entry = ttk.Entry(frame, textvariable=self.destination_var)
         self.destination_entry.grid(row=1, column=1, sticky="ew", pady=(0, 12))
         ttk.Button(frame, text="Browse...", command=self.choose_destination).grid(
             row=1, column=2, padx=(8, 0), pady=(0, 12)
@@ -3486,6 +3490,9 @@ class ChatGPTToDocxApp:
         self.pasted_text.bind("<Control-V>", self.paste_formatted_text)
         self.pasted_text.bind("<Shift-Insert>", self.paste_formatted_text)
         self.pasted_text.bind("<<Paste>>", self.paste_formatted_text)
+        self.pasted_text.bind("<<Modified>>", self._on_pasted_text_modified)
+        self.url_var.trace_add("write", lambda *_args: self._schedule_save())
+        self.destination_var.trace_add("write", lambda *_args: self._schedule_save())
 
         self.console_button = ttk.Button(
             frame,
@@ -3516,6 +3523,36 @@ class ChatGPTToDocxApp:
         self.status.grid(row=6, column=0, columnspan=3, sticky="w", pady=(12, 0))
         self._cancel_event = threading.Event()
         self.restore_state()
+        try:
+            self.pasted_text.edit_modified(False)
+        except tk.TclError:
+            pass
+        self._autosave_ready = True
+
+    def _schedule_save(self, delay_ms=400):
+        """Autosave shortly after any change so nothing is lost if the program
+        is closed any other way than the normal exit (console closed, killed,
+        crash, power loss)."""
+        if not self._autosave_ready:
+            return
+        try:
+            if self._save_job is not None:
+                self.root.after_cancel(self._save_job)
+            self._save_job = self.root.after(delay_ms, self._run_scheduled_save)
+        except tk.TclError:
+            pass
+
+    def _run_scheduled_save(self):
+        self._save_job = None
+        self.save_state()
+
+    def _on_pasted_text_modified(self, _event=None):
+        try:
+            if self.pasted_text.edit_modified():
+                self.pasted_text.edit_modified(False)
+                self._schedule_save()
+        except tk.TclError:
+            pass
 
     def save_state(self):
         try:
@@ -3546,8 +3583,10 @@ class ChatGPTToDocxApp:
                 "destination": self.destination_entry.get().strip(),
                 "paragraphs": serialized,
             }
-            with self.state_path.open("w", encoding="utf-8") as file:
+            temporary_path = self.state_path.with_suffix(".tmp")
+            with temporary_path.open("w", encoding="utf-8") as file:
                 json.dump(payload, file, ensure_ascii=False)
+            os.replace(temporary_path, self.state_path)
         except OSError:
             pass
 
