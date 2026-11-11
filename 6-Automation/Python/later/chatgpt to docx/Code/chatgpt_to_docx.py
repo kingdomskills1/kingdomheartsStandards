@@ -3307,19 +3307,44 @@ def _build_chrome_options():
 
 
 _HIDE_OVERLAYS_JS = """
+const target = arguments[0];
+const keepScope = !!arguments[1];
+let scope = null;
+if (target && keepScope) {
+  scope = target;
+  for (let i = 0; i < 3 && scope.parentElement
+       && scope.parentElement !== document.body; i++) scope = scope.parentElement;
+}
 for (const el of document.querySelectorAll('body *')) {
   const pos = getComputedStyle(el).position;
   if ((pos === 'fixed' || pos === 'sticky')
       && !el.closest('table, pre, [data-capture-keep]')
-      && !el.querySelector('table, pre, [data-capture-keep]')) {
+      && !el.querySelector('table, pre, [data-capture-keep]')
+      && !(scope && scope.contains(el))) {
     el.style.setProperty('visibility', 'hidden', 'important');
+    el.setAttribute('data-capture-hidden', '1');
   }
+}
+"""
+
+
+_RESTORE_HIDDEN_JS = """
+for (const el of document.querySelectorAll('[data-capture-hidden]')) {
+  el.style.removeProperty('visibility');
+  el.removeAttribute('data-capture-hidden');
 }
 """
 
 
 _HIDE_COVERING_JS = """
 const target = arguments[0];
+const keepScope = !!arguments[1];
+let scope = null;
+if (keepScope) {
+  scope = target;
+  for (let i = 0; i < 3 && scope.parentElement
+       && scope.parentElement !== document.body; i++) scope = scope.parentElement;
+}
 const r = target.getBoundingClientRect();
 let count = 0;
 for (const fy of [0.02, 0.15, 0.3, 0.5, 0.7, 0.85, 0.98]) {
@@ -3331,13 +3356,53 @@ for (const fy of [0.02, 0.15, 0.3, 0.5, 0.7, 0.85, 0.98]) {
       if (el === target || target.contains(el)) break;
       if (el.contains(target)) continue;
       if (el === document.documentElement || el === document.body) continue;
+      if (scope && scope.contains(el)) continue;
       el.style.setProperty('visibility', 'hidden', 'important');
+      el.setAttribute('data-capture-hidden', '1');
       count++;
     }
   }
 }
 return count;
 """
+
+
+_ROWS_JS = """
+const t = arguments[0];
+const t0 = t.getBoundingClientRect();
+return Array.from(t.querySelectorAll('tr, [role=row]')).map(tr => {
+  const r = tr.getBoundingClientRect();
+  return {top: Math.round(r.top - t0.top), height: Math.round(r.height),
+          text: (tr.innerText || '').trim().length};
+});
+"""
+
+
+def _first_row_is_blank(driver, element, png):
+    """True when ANY row that has text is empty in the screenshot.
+
+    (Name kept for compatibility.) A covering overlay can hide the header row
+    and the first data row, so every row is checked, not only the first.
+    """
+    if Image is None:
+        return False
+    try:
+        image = Image.open(io.BytesIO(png)).convert("L")
+        for info in driver.execute_script(_ROWS_JS, element) or []:
+            if not info.get("text") or info["height"] < 8:
+                continue
+            top = max(0, info["top"])
+            if top >= image.height:
+                continue
+            band = image.crop(
+                (0, top, image.width, min(image.height, top + info["height"]))
+            )
+            low, high = band.getextrema()
+            if (high - low) < 8:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _png_is_blank(png_bytes):
@@ -3349,8 +3414,18 @@ def _png_is_blank(png_bytes):
 
 
 def _element_to_png_bytes(driver, element, attempts=3):
-    driver.execute_script(_HIDE_OVERLAYS_JS)
+    best_png = None
     for _attempt in range(attempts):
+        # variant 0: hide every fixed/sticky element outside the table;
+        # variant 1: same, but keep sticky parts of the table's own wrapper
+        #            (ChatGPT can draw the header row as a sticky copy);
+        # variant 2: hide nothing and scroll the table clear of the page header.
+        try:
+            driver.execute_script(_RESTORE_HIDDEN_JS)
+            if _attempt < 2:
+                driver.execute_script(_HIDE_OVERLAYS_JS, element, _attempt == 1)
+        except Exception:
+            pass
         height = driver.execute_script(
             "return Math.ceil(arguments[0].getBoundingClientRect().height);",
             element,
@@ -3376,11 +3451,19 @@ def _element_to_png_bytes(driver, element, attempts=3):
             "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
             element,
         )
+        if _attempt == 2:
+            driver.execute_script(
+                "const r = arguments[0].getBoundingClientRect();"
+                "window.scrollBy(0, r.top - 220);",
+                element,
+            )
         time.sleep(0.8)
         # Hide whatever is painted on top of the element (sticky headers,
         # login banners, ...), then let the page repaint.
         try:
-            if driver.execute_script(_HIDE_COVERING_JS, element):
+            if _attempt < 2 and driver.execute_script(
+                _HIDE_COVERING_JS, element, _attempt == 1
+            ):
                 time.sleep(0.3)
         except Exception:
             pass
@@ -3403,12 +3486,22 @@ def _element_to_png_bytes(driver, element, attempts=3):
         )
         png = base64.b64decode(shot["data"])
         if not _png_is_blank(png):
-            return png
+            if not _first_row_is_blank(driver, element, png):
+                return png
+            if best_png is None:
+                best_png = png  # usable, but the header row is missing
+            continue
         time.sleep(1.0)
+    # best_png has missing rows, so it is NOT returned: returning None makes
+    # the caller draw the table image from the text, which has every row.
     # Fallbacks: Selenium's own element screenshot, then a full-page clip.
     try:
         png = element.screenshot_as_png
-        if png and not _png_is_blank(png):
+        if (
+            png
+            and not _png_is_blank(png)
+            and not _first_row_is_blank(driver, element, png)
+        ):
             return png
     except Exception:
         pass
@@ -3430,7 +3523,7 @@ def _element_to_png_bytes(driver, element, attempts=3):
             },
         )
         png = base64.b64decode(shot["data"])
-        if not _png_is_blank(png):
+        if not _png_is_blank(png) and not _first_row_is_blank(driver, element, png):
             return png
     except Exception:
         pass
