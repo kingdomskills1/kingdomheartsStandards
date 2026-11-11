@@ -3413,6 +3413,74 @@ def _png_is_blank(png_bytes):
     return (high - low) < 8
 
 
+_RECT_JS = """
+const r = arguments[0].getBoundingClientRect();
+return {x: r.left + window.scrollX, y: r.top + window.scrollY,
+        width: r.width, height: r.height, vtop: r.top};
+"""
+
+
+_WAIT_ASSETS_JS = """
+document.documentElement.style.setProperty('scroll-behavior', 'auto', 'important');
+document.body.style.setProperty('scroll-behavior', 'auto', 'important');
+const imgs = Array.from(document.images).filter(i => !i.complete);
+return imgs.length;
+"""
+
+
+def _wait_for_stable_layout(driver, element, timeout=6.0):
+    """Wait until images have loaded and the table stops moving.
+
+    A photo above the table that finishes loading after the capture area was
+    measured shifts the table, so the screenshot shows part of the photo and
+    cuts off the last row.
+    """
+    deadline = time.time() + timeout
+    last = None
+    stable = 0
+    while time.time() < deadline:
+        try:
+            pending = driver.execute_script(_WAIT_ASSETS_JS)
+            rect = driver.execute_script(_RECT_JS, element)
+        except Exception:
+            return
+        key = (
+            round(rect["x"]), round(rect["y"]), round(rect["width"]),
+            round(rect["height"]), round(rect["vtop"]),
+        )
+        if not pending and key == last:
+            stable += 1
+            if stable >= 3:
+                return
+        else:
+            stable = 0
+        last = key
+        time.sleep(0.15)
+
+
+def _edges_have_foreign_content(png_bytes):
+    """True when the top or bottom edge strip has dark content.
+
+    A correct table capture has plain background at the very top and bottom.
+    Dark pixels there mean the clip is shifted: it shows part of the photo
+    above the table, or cuts through the last row's text.
+    """
+    if Image is None:
+        return False
+    try:
+        image = Image.open(io.BytesIO(png_bytes)).convert("L")
+        w, h = image.size
+        if h < 12:
+            return False
+        for box in ((0, 0, w, 3), (0, h - 3, w, h)):
+            low, high = image.crop(box).getextrema()
+            if (high - low) > 60:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _element_to_png_bytes(driver, element, attempts=3):
     best_png = None
     for _attempt in range(attempts):
@@ -3448,7 +3516,7 @@ def _element_to_png_bytes(driver, element, attempts=3):
             time.sleep(0.4)
 
         driver.execute_script(
-            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'});",
             element,
         )
         if _attempt == 2:
@@ -3467,29 +3535,31 @@ def _element_to_png_bytes(driver, element, attempts=3):
                 time.sleep(0.3)
         except Exception:
             pass
-        rect = driver.execute_script(
-            """
-            const r = arguments[0].getBoundingClientRect();
-            return {x: r.left + window.scrollX, y: r.top + window.scrollY,
-                    width: r.width, height: r.height};
-            """,
-            element,
-        )
+        _wait_for_stable_layout(driver, element)
+        rect = driver.execute_script(_RECT_JS, element)
+        clip = {k: rect[k] for k in ("x", "y", "width", "height")}
         shot = driver.execute_cdp_cmd(
             "Page.captureScreenshot",
             {
                 "format": "png",
                 "fromSurface": True,
                 "captureBeyondViewport": False,
-                "clip": {**rect, "scale": 1},
+                "clip": {**clip, "scale": 1},
             },
         )
+        rect_after = driver.execute_script(_RECT_JS, element)
+        if any(abs(rect[k] - rect_after[k]) > 1 for k in rect):
+            # The table moved while it was being captured; try again.
+            time.sleep(0.5)
+            continue
         png = base64.b64decode(shot["data"])
         if not _png_is_blank(png):
-            if not _first_row_is_blank(driver, element, png):
+            if not _first_row_is_blank(
+                driver, element, png
+            ) and not _edges_have_foreign_content(png):
                 return png
             if best_png is None:
-                best_png = png  # usable, but the header row is missing
+                best_png = png  # defective: rows missing or clip shifted
             continue
         time.sleep(1.0)
     # best_png has missing rows, so it is NOT returned: returning None makes
@@ -3501,6 +3571,7 @@ def _element_to_png_bytes(driver, element, attempts=3):
             png
             and not _png_is_blank(png)
             and not _first_row_is_blank(driver, element, png)
+            and not _edges_have_foreign_content(png)
         ):
             return png
     except Exception:
@@ -3523,7 +3594,11 @@ def _element_to_png_bytes(driver, element, attempts=3):
             },
         )
         png = base64.b64decode(shot["data"])
-        if not _png_is_blank(png) and not _first_row_is_blank(driver, element, png):
+        if (
+            not _png_is_blank(png)
+            and not _first_row_is_blank(driver, element, png)
+            and not _edges_have_foreign_content(png)
+        ):
             return png
     except Exception:
         pass
