@@ -75,6 +75,11 @@ KEEP_CODE_TEXT_AFTER_SCREENSHOT = True
 # If the Chrome screenshot of a plain-text block is missing or fails, draw an
 # identical-looking block ("</> Plain text" header, copy icons) with Pillow.
 FALLBACK_RENDER_CODE_BLOCKS = True
+# How plain-text (code block) images are made:
+#   "clean"   - drawn with Pillow: light gray rounded box, no language label,
+#               small copy icon top-right (the look of the Left-Handed Helix doc)
+#   "chatgpt" - Chrome screenshot of the block from the ChatGPT page
+CODE_BLOCK_IMAGE_STYLE = "clean"
 _CONSOLE_CTRL_HANDLER = None
 _CONSOLE_CLOSED_CALLBACK = None
 _ACTIVE_DRIVERS = set()
@@ -1567,6 +1572,22 @@ class _MathParser:
         "&": "&",
     }
 
+    ACCENTS = {
+        "vec": "\u20d7",
+        "overrightarrow": "\u20d7",
+        "hat": "\u0302",
+        "widehat": "\u0302",
+        "tilde": "\u0303",
+        "widetilde": "\u0303",
+        "bar": "\u0305",
+        "dot": "\u0307",
+        "ddot": "\u0308",
+        "acute": "\u0301",
+        "grave": "\u0300",
+        "breve": "\u0306",
+        "check": "\u030c",
+    }
+
     NARY_COMMANDS = {
         "sum", "prod", "int", "bigcap", "bigcup", "bigvee", "bigwedge",
         "bigoplus", "bigotimes", "coprod",
@@ -1743,6 +1764,30 @@ class _MathParser:
                     _append_script_content(part, value)
                     fraction.append(part)
                 return fraction
+            if command in self.ACCENTS:
+                accent = _math_element("acc")
+                properties = _math_element("accPr")
+                accent_char = _math_element("chr")
+                accent_char.set(f"{{{_MATH_NS}}}val", self.ACCENTS[command])
+                properties.append(accent_char)
+                properties.append(_math_ctrl_pr())
+                accent.append(properties)
+                expression = _math_element("e")
+                _append_script_content(expression, self._script_argument())
+                accent.append(expression)
+                return accent
+            if command == "overline":
+                over = _math_element("bar")
+                properties = _math_element("barPr")
+                position = _math_element("pos")
+                position.set(f"{{{_MATH_NS}}}val", "top")
+                properties.append(position)
+                properties.append(_math_ctrl_pr())
+                over.append(properties)
+                expression = _math_element("e")
+                _append_script_content(expression, self._script_argument())
+                over.append(expression)
+                return over
             if command == "sqrt":
                 radicand = self._group()
                 radical = _math_element("rad")
@@ -2510,6 +2555,57 @@ def _render_code_block_png(lines, label="Plain text"):
     return buffer.getvalue()
 
 
+def _render_clean_code_block_png(lines):
+    """Light-gray rounded code box with a small copy icon (no header label)."""
+    if Image is None or ImageDraw is None or ImageFont is None:
+        return b""
+    mono_paths = (
+        r"C:\Windows\Fonts\consola.ttf",
+        "consola.ttf",
+        "DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "LiberationMono-Regular.ttf",
+    )
+    scale = 3  # draw at 3x, then downsample for smooth edges
+    char_width = 7.7  # Consolas 14 px
+    mono = _first_font(mono_paths, 24)
+    try:
+        em_width = mono.getlength("M") / 24
+        mono = _first_font(mono_paths, max(8.0, char_width * scale / em_width))
+    except Exception:
+        pass
+    lines = [line.replace("\t", "    ").rstrip() for line in lines] or [""]
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    text_width = max((probe.textlength(line, font=mono) for line in lines), default=0)
+    width = int(max(766 * scale, text_width + 80 * scale))
+    line_height = 20 * scale
+    height = 12 * scale * 2 + line_height * len(lines)
+    background = (243, 243, 243)
+    ink = (13, 13, 13)
+
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle(
+        (0, 0, width - 1, height - 1), radius=12 * scale, fill=background
+    )
+    for number, line in enumerate(lines):
+        baseline = 12 * scale + number * line_height + 14 * scale
+        draw.text((20 * scale, baseline), line, font=mono, fill=ink, anchor="ls")
+
+    # copy icon: two overlapping rounded squares, top-right
+    w = int(1.5 * scale)
+    right = width - 17 * scale
+    back = (right - 12 * scale, 12 * scale, right, 24 * scale)
+    front = (right - 17 * scale, 16 * scale, right - 5 * scale, 28 * scale)
+    draw.rounded_rectangle(back, radius=3 * scale, outline=ink, width=w)
+    draw.rounded_rectangle(front, radius=3 * scale, outline=ink, fill=background, width=w)
+
+    image = image.resize((width // scale, height // scale), Image.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def _add_code_screenshot(document, png_data):
     if not png_data:
         return False
@@ -2595,7 +2691,7 @@ def _dom_table_signature(driver, table):
     """First-column text of every row of a table on the ChatGPT page."""
     try:
         text = driver.execute_script(
-            "return Array.from(arguments[0].querySelectorAll('tr'))"
+            "return Array.from(arguments[0].querySelectorAll('tr, [role=row]'))"
             ".map(r => r.children.length ? r.children[0].innerText.trim() : '')"
             ".join(' ');",
             table,
@@ -2634,6 +2730,53 @@ def _take_table_screenshot(shots, rows):
     if best_index is None or best_ratio < 0.92:
         return None
     return shots.pop(best_index).png
+
+
+_REPLY_CONTAINER_JS = """
+const sels = [
+  '[data-message-author-role="assistant"]',
+  '[data-turn="assistant"]',
+  'article[data-testid^="conversation-turn"]',
+  '[data-testid^="conversation-turn"]',
+  '.markdown',
+  '.prose',
+  'main'
+];
+const want = arguments[0];
+for (const sel of sels) {
+  const els = Array.from(document.querySelectorAll(sel));
+  for (let i = els.length - 1; i >= 0; i--) {
+    if (els[i].querySelector(want)) return els[i];
+  }
+}
+return document.body;
+"""
+
+
+def _dump_capture_debug(driver, note):
+    """Save what Chrome saw, so a failed capture can be diagnosed."""
+    try:
+        import tempfile
+
+        folder = Path(tempfile.gettempdir()) / "chatgpt_to_word_debug"
+        folder.mkdir(parents=True, exist_ok=True)
+        info = driver.execute_script(
+            "return {title: document.title, url: location.href,"
+            " tables: document.querySelectorAll('table,[role=table]').length,"
+            " pre: document.querySelectorAll('pre').length,"
+            " assistant: document.querySelectorAll('[data-message-author-role=assistant]').length,"
+            " text: (document.body.innerText||'').slice(0, 1500)};"
+        )
+        (folder / "capture_debug.txt").write_text(
+            f"{note}\n\n{json.dumps(info, indent=2)}", encoding="utf-8"
+        )
+        (folder / "capture_debug.html").write_text(
+            driver.page_source, encoding="utf-8", errors="replace"
+        )
+        driver.save_screenshot(str(folder / "capture_debug.png"))
+        print(f"[capture] debug files saved to {folder}")
+    except Exception as exc:
+        print(f"[capture] could not save debug files: {exc}")
 
 
 def _capture_chatgpt_screenshots(
@@ -2675,13 +2818,19 @@ def _capture_chatgpt_screenshots(
                 cancel_event=cancel_event,
                 content_selector=selector,
             )
-            assistant_messages = driver.find_elements(
-                By.CSS_SELECTOR,
-                '[data-message-author-role="assistant"]',
-            )
-            last_message = assistant_messages[-1] if assistant_messages else None
+            last_message = None
+            try:
+                last_message = driver.execute_script(_REPLY_CONTAINER_JS, selector)
+            except Exception:
+                last_message = None
+            if last_message is None:
+                assistant_messages = driver.find_elements(
+                    By.CSS_SELECTOR,
+                    '[data-message-author-role="assistant"]',
+                )
+                last_message = assistant_messages[-1] if assistant_messages else None
             tables = (
-                last_message.find_elements(By.CSS_SELECTOR, "table")
+                last_message.find_elements(By.CSS_SELECTOR, "table, [role='table']")
                 if last_message is not None and want_tables
                 else []
             )
@@ -2695,6 +2844,11 @@ def _capture_chatgpt_screenshots(
                 or (want_tables and not tables)
                 or (want_code and not code_blocks)
             ):
+                _dump_capture_debug(
+                    driver,
+                    f"attempt {_attempt + 1}: ready={ready}, "
+                    f"tables={len(tables)}, code_blocks={len(code_blocks)}",
+                )
                 continue  # page did not hydrate: retry with a fresh browser
 
             table_screenshots = []
@@ -2735,6 +2889,12 @@ def _capture_chatgpt_screenshots(
                 except Exception:
                     code_screenshots.append(None)
 
+            if want_tables and tables and not any(table_screenshots):
+                _dump_capture_debug(
+                    driver,
+                    f"attempt {_attempt + 1}: found {len(tables)} table element(s) "
+                    "but every screenshot came back blank or failed",
+                )
             if any(table_screenshots) or any(code_screenshots):
                 score = sum(1 for shot in table_screenshots if shot)
                 if score > best_score:
@@ -2834,10 +2994,15 @@ def _add_response_text(
                     and SCREENSHOT_CODE_BLOCKS
                     and FALLBACK_RENDER_CODE_BLOCKS
                 ):
-                    code_screenshot = _render_code_block_png(
-                        lines[index + 1 : block_end],
-                        _code_block_label(stripped[3:]),
-                    )
+                    if CODE_BLOCK_IMAGE_STYLE == "clean":
+                        code_screenshot = _render_clean_code_block_png(
+                            lines[index + 1 : block_end]
+                        )
+                    else:
+                        code_screenshot = _render_code_block_png(
+                            lines[index + 1 : block_end],
+                            _code_block_label(stripped[3:]),
+                        )
                 if code_screenshot and _add_code_screenshot(document, code_screenshot):
                     if not KEEP_CODE_TEXT_AFTER_SCREENSHOT:
                         index = block_end + 1
@@ -3132,7 +3297,12 @@ def _build_chrome_options():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--log-level=3")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    chrome_options.add_argument("--lang=en-US")
+    chrome_options.add_argument(f"--user-agent={USER_AGENT}")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option(
+        "excludeSwitches", ["enable-logging", "enable-automation"]
+    )
     return chrome_options
 
 
@@ -3145,6 +3315,28 @@ for (const el of document.querySelectorAll('body *')) {
     el.style.setProperty('visibility', 'hidden', 'important');
   }
 }
+"""
+
+
+_HIDE_COVERING_JS = """
+const target = arguments[0];
+const r = target.getBoundingClientRect();
+let count = 0;
+for (const fy of [0.02, 0.15, 0.3, 0.5, 0.7, 0.85, 0.98]) {
+  for (const fx of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+    const x = r.left + r.width * fx;
+    const y = r.top + r.height * fy;
+    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el === target || target.contains(el)) break;
+      if (el.contains(target)) continue;
+      if (el === document.documentElement || el === document.body) continue;
+      el.style.setProperty('visibility', 'hidden', 'important');
+      count++;
+    }
+  }
+}
+return count;
 """
 
 
@@ -3164,14 +3356,34 @@ def _element_to_png_bytes(driver, element, attempts=3):
             element,
         )
         window_height = driver.execute_script("return window.innerHeight;")
-        if height + 200 > window_height:
-            driver.set_window_size(1600, height + 400)
+        if height + 600 > window_height:
+            # Make the viewport taller than the element so nothing is cut off.
+            try:
+                driver.execute_cdp_cmd(
+                    "Emulation.setDeviceMetricsOverride",
+                    {
+                        "width": 1600,
+                        "height": int(max(1200, height + 600)),
+                        "deviceScaleFactor": 1,
+                        "mobile": False,
+                    },
+                )
+            except Exception:
+                driver.set_window_size(1600, height + 400)
+            time.sleep(0.4)
 
         driver.execute_script(
             "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
             element,
         )
         time.sleep(0.8)
+        # Hide whatever is painted on top of the element (sticky headers,
+        # login banners, ...), then let the page repaint.
+        try:
+            if driver.execute_script(_HIDE_COVERING_JS, element):
+                time.sleep(0.3)
+        except Exception:
+            pass
         rect = driver.execute_script(
             """
             const r = arguments[0].getBoundingClientRect();
@@ -3193,6 +3405,35 @@ def _element_to_png_bytes(driver, element, attempts=3):
         if not _png_is_blank(png):
             return png
         time.sleep(1.0)
+    # Fallbacks: Selenium's own element screenshot, then a full-page clip.
+    try:
+        png = element.screenshot_as_png
+        if png and not _png_is_blank(png):
+            return png
+    except Exception:
+        pass
+    try:
+        rect = driver.execute_script(
+            """
+            const r = arguments[0].getBoundingClientRect();
+            return {x: r.left + window.scrollX, y: r.top + window.scrollY,
+                    width: r.width, height: r.height};
+            """,
+            element,
+        )
+        shot = driver.execute_cdp_cmd(
+            "Page.captureScreenshot",
+            {
+                "format": "png",
+                "captureBeyondViewport": True,
+                "clip": {**rect, "scale": 1},
+            },
+        )
+        png = base64.b64decode(shot["data"])
+        if not _png_is_blank(png):
+            return png
+    except Exception:
+        pass
     return None
 
 
@@ -3404,8 +3645,85 @@ def save_docx(
                         standalone=True,
                     )
                 finalized.writestr(entry, data)
-    with open(destination, "wb") as output:
-        output.write(finalized_package.getvalue())
+    data = finalized_package.getvalue()
+    try:
+        with open(destination, "wb") as output:
+            output.write(data)
+        return str(destination)
+    except PermissionError:
+        # Usually the .docx is still open in Word. Save next to it under a
+        # new name instead of losing the whole conversion.
+        base = Path(destination)
+        for number in range(2, 100):
+            alternate = base.with_name(f"{base.stem} ({number}){base.suffix}")
+            if alternate.exists():
+                continue
+            try:
+                with open(alternate, "wb") as output:
+                    output.write(data)
+                return str(alternate)
+            except PermissionError:
+                continue
+        raise PermissionError(
+            f"Cannot write to {destination}. Close the file in Word, or choose "
+            "a different folder (Desktop may be protected by OneDrive or "
+            "Controlled folder access)."
+        )
+
+
+def _notify_windows(title, message):
+    """Show a Windows toast notification (best effort, never raises)."""
+    if os.name != "nt":
+        return
+
+    def worker():
+        try:
+            import base64 as _b64
+            from xml.sax.saxutils import escape
+
+            script = (
+                "[Windows.UI.Notifications.ToastNotificationManager,"
+                " Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;"
+                "[Windows.Data.Xml.Dom.XmlDocument,"
+                " Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null;"
+                "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument;"
+                "$xml.LoadXml('<toast><visual><binding template=\"ToastGeneric\">"
+                f"<text>{escape(title).replace(chr(39), chr(39) * 2)}</text>"
+                f"<text>{escape(message).replace(chr(39), chr(39) * 2)}</text>"
+                "</binding></visual></toast>');"
+                "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml);"
+                "$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}"
+                "\\WindowsPowerShell\\v1.0\\powershell.exe';"
+                "[Windows.UI.Notifications.ToastNotificationManager]"
+                "::CreateToastNotifier($id).Show($toast)"
+            )
+            encoded = _b64.b64encode(script.encode("utf-16-le")).decode("ascii")
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-EncodedCommand",
+                    encoded,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+                timeout=20,
+            )
+            return
+        except Exception:
+            pass
+        try:  # fallback: balloon from the tray icon, or just a sound
+            import winsound
+
+            winsound.MessageBeep()
+        except Exception:
+            pass
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 class ChatGPTToDocxApp:
@@ -3500,6 +3818,14 @@ class ChatGPTToDocxApp:
             command=self.open_console,
         )
         self.console_button.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        self.notify_var = tk.BooleanVar(value=True)
+        self.notify_var.trace_add("write", lambda *_args: self._schedule_save())
+        self.notify_check = ttk.Checkbutton(
+            frame,
+            text="Notify me in Windows when done",
+            variable=self.notify_var,
+        )
+        self.notify_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.convert_button = ttk.Button(
             frame, text="Convert latest reply", command=self.convert
         )
@@ -3581,6 +3907,7 @@ class ChatGPTToDocxApp:
             payload = {
                 "url": self.url_entry.get().strip(),
                 "destination": self.destination_entry.get().strip(),
+                "notify": bool(self.notify_var.get()),
                 "paragraphs": serialized,
             }
             temporary_path = self.state_path.with_suffix(".tmp")
@@ -3603,6 +3930,7 @@ class ChatGPTToDocxApp:
         url = payload.get("url", "")
         destination = payload.get("destination", "")
         paragraphs = payload.get("paragraphs", [])
+        self.notify_var.set(bool(payload.get("notify", True)))
         if url:
             self.url_entry.insert(0, url)
         if destination:
@@ -4012,7 +4340,9 @@ class ChatGPTToDocxApp:
 
             table_count = _count_markdown_tables(text)
             code_count = (
-                len(_fenced_code_blocks(text)) if SCREENSHOT_CODE_BLOCKS else 0
+                len(_fenced_code_blocks(text))
+                if SCREENSHOT_CODE_BLOCKS and CODE_BLOCK_IMAGE_STYLE == "chatgpt"
+                else 0
             )
             table_screenshots = []
             code_screenshots = []
@@ -4088,14 +4418,14 @@ class ChatGPTToDocxApp:
                 destination = str(default_output_path(text))
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
-            save_docx(
+            destination = save_docx(
                 text,
                 destination,
                 images,
                 heading_content,
                 table_screenshots=table_screenshots,
                 code_screenshots=code_screenshots,
-            )
+            ) or destination
         except RuntimeError as error:
             if str(error) == "Conversion cancelled.":
                 self.root.after(0, self._finish_conversion, None, None, True)
@@ -4127,6 +4457,8 @@ class ChatGPTToDocxApp:
             return
         if error is not None:
             self.status.configure(text="Conversion failed.")
+            if self.notify_var.get():
+                _notify_windows("ChatGPT to Word - failed", str(error)[:200])
             self.show_error_dialog(error)
             return
 
@@ -4135,9 +4467,18 @@ class ChatGPTToDocxApp:
 
         if warnings:
             self.status.configure(text=f"Saved with warnings: {destination}")
+            if self.notify_var.get():
+                _notify_windows(
+                    "ChatGPT to Word - saved with warnings",
+                    f"{Path(destination).name}: some screenshots are missing.",
+                )
             self.show_warning_dialog(destination, warnings)
         else:
             self.status.configure(text=f"Saved: {destination}")
+            if self.notify_var.get():
+                _notify_windows(
+                    "ChatGPT to Word - done", f"Saved {Path(destination).name}"
+                )
             messagebox.showinfo(
                 "Conversion complete",
                 f"Word document saved to:\n{destination}",
