@@ -883,7 +883,7 @@ def _latest_response_record(html):
     )
 
 
-def _image_specs(text, metadata):
+def _image_specs(text, metadata, skipped=None):
     placeholders = list(
         re.finditer(r"<AsyncImage(?:Group)?\b[^>]*?/?>", text)
     )
@@ -940,30 +940,34 @@ def _image_specs(text, metadata):
             and item["url"].startswith("https://images.openai.com/")
         ]
         if component_type == "async_image_group":
-            group_urls = [
-                url for url in image_urls if "purpose=fullsize" in url
-            ] or [
-                url for url in image_urls if "purpose=inline" in url
-            ]
+            group_urls = (
+                [url for url in image_urls if "purpose=fullsize" in url]
+                or [url for url in image_urls if "purpose=inline" in url]
+                or image_urls
+            )
             if not group_urls:
-                raise ValueError(
-                    "The shared reply contains an image group without "
-                    "downloadable ChatGPT images."
-                )
+                # ChatGPT gave no downloadable file for this group: skip it
+                # instead of failing the whole conversion.
+                print("[images] skipped an image group with no downloadable images")
+                if skipped is not None:
+                    skipped.append("an image group with no downloadable images")
+                continue
             specs.extend((placeholder.group(), url) for url in group_urls)
             continue
         url = next(
             (item for item in image_urls if "purpose=fullsize" in item),
             next(
                 (item for item in image_urls if "purpose=inline" in item),
-                None,
+                image_urls[0] if image_urls else None,
             ),
         )
         if not url:
-            raise ValueError(
-                "The shared reply contains an image that ChatGPT did not "
-                "provide as a downloadable image."
-            )
+            # No downloadable file (e.g. an image that expired or was never
+            # shared): skip it instead of failing the whole conversion.
+            print("[images] skipped an image with no downloadable file")
+            if skipped is not None:
+                skipped.append("an image with no downloadable file")
+            continue
         specs.append((placeholder.group(), url))
     return specs
 
@@ -1009,12 +1013,17 @@ def _fetch_response_record(url):
     return _normalize_image_placeholders(text), metadata
 
 
-def fetch_latest_response_with_images(url):
+def fetch_latest_response_with_images(url, skipped=None):
+    """Returns (text, images). Anything skipped is described in `skipped`."""
     text, metadata = _fetch_response_record(url)
-    images = [
-        _download_shared_image(placeholder, image_url)
-        for placeholder, image_url in _image_specs(text, metadata)
-    ]
+    images = []
+    for placeholder, image_url in _image_specs(text, metadata, skipped):
+        try:
+            images.append(_download_shared_image(placeholder, image_url))
+        except Exception as error:  # one bad image must not stop the document
+            print(f"[images] could not download an image: {error}")
+            if skipped is not None:
+                skipped.append(f"an image that failed to download ({error})")
     return text, images
 
 
@@ -4438,11 +4447,12 @@ class ChatGPTToDocxApp:
     def show_warning_dialog(self, destination, warnings):
         message = "\n\n".join(warnings)
         self._show_copy_dialog(
-            "Saved, but some screenshots are missing",
+            "Saved, but some items are missing",
             f"Word document saved to:\n{destination}",
             message
-            + "\n\nThe content was still built from the text, but without "
-            "the missing screenshot images. Try converting again if you need them.",
+            + "\n\nThe document was still saved from the reply text, but "
+            "without the items listed above. Try converting again, or "
+            "re-share the conversation, if you need them.",
             copy_text=f"Saved to: {destination}\n\n{message}",
         )
 
@@ -4528,7 +4538,13 @@ class ChatGPTToDocxApp:
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
             self.root.after(0, self._set_progress, 10, "Fetching the latest reply...")
-            text, images = fetch_latest_response_with_images(url)
+            skipped_images = []
+            text, images = fetch_latest_response_with_images(url, skipped_images)
+            if skipped_images:
+                warnings.append(
+                    f"{len(skipped_images)} image(s) were skipped and are NOT "
+                    "in the Word file:\n- " + "\n- ".join(skipped_images)
+                )
             if self._cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
 
@@ -4664,7 +4680,8 @@ class ChatGPTToDocxApp:
             if self.notify_var.get():
                 _notify_windows(
                     "ChatGPT to Word - saved with warnings",
-                    f"{Path(destination).name}: some screenshots are missing.",
+                    f"{Path(destination).name}: "
+                    + " | ".join(w.split("\n")[0] for w in warnings)[:180],
                 )
             self.show_warning_dialog(destination, warnings)
         else:
