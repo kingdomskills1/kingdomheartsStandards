@@ -1487,6 +1487,12 @@ class _MathParser:
         "equiv": "≡",
         "circ": "∘",
         "angle": "∠",
+        "triangle": "△",
+        "bigtriangleup": "△",
+        "triangledown": "▽",
+        "square": "□",
+        "degree": "°",
+        "measuredangle": "∡",
         "perp": "⊥",
         "vert": "|",
         "mid": "\u2223",
@@ -1593,7 +1599,19 @@ class _MathParser:
         "bigoplus", "bigotimes", "coprod",
     }
 
+    # Function names are typeset upright (plain style), not italic.
+    FUNCTION_NAMES = {
+        "sin", "cos", "tan", "cot", "sec", "csc",
+        "log", "ln", "lim", "max", "min", "det", "exp",
+    }
+
     def __init__(self, expression):
+        # x^\circ and x^{\circ} mean "degrees", not the ring operator
+        expression = re.sub(
+            r"\^\s*\{\s*\\circ\s*\}|\^\s*\\circ(?![A-Za-z])",
+            r"^{\\degree}",
+            expression,
+        )
         self.tokens = re.findall(self.TOKEN_RE, expression)
         self.position = 0
 
@@ -1887,6 +1905,14 @@ class _MathParser:
                 properties.append(_math_ctrl_pr())
                 nary.append(properties)
                 return nary
+            if command in self.FUNCTION_NAMES:
+                run = _math_run(command)
+                properties = _math_element("rPr")
+                style = _math_element("sty")
+                style.set(f"{{{_MATH_NS}}}val", "p")
+                properties.append(style)
+                run.insert(0, properties)
+                return run
             if command in self.COMMANDS:
                 return _math_run(self.COMMANDS[command])
             return _math_run(command)
