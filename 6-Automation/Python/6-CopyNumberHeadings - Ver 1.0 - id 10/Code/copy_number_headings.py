@@ -10,6 +10,9 @@ from tkinter import ttk, filedialog, messagebox
 
 from copy_number_headings_core import (
     extract_headings_from_docx,
+    extract_headings_with_sources_from_docx,
+    format_source_summary,
+    format_sources,
     number_headings,
     write_numbered_docx,
     main as cli_main,
@@ -92,10 +95,21 @@ class HeadingGUI(tk.Tk):
             command=self.export_all
         ).pack(side="left", padx=4, pady=4)
 
-        ttk.Label(right_frame, text="Headings Preview").pack(anchor="w")
+        preview_panes = ttk.Panedwindow(right_frame, orient=tk.VERTICAL)
+        preview_panes.pack(fill="both", expand=True)
 
-        self.txt_preview = tk.Text(right_frame, wrap="word")
+        headings_frame = ttk.Frame(preview_panes)
+        sources_frame = ttk.Frame(preview_panes)
+        preview_panes.add(headings_frame, weight=3)
+        preview_panes.add(sources_frame, weight=2)
+
+        ttk.Label(headings_frame, text="Headings").pack(anchor="w")
+        self.txt_preview = tk.Text(headings_frame, wrap="word", height=12)
         self.txt_preview.pack(fill="both", expand=True)
+
+        ttk.Label(sources_frame, text="Sources").pack(anchor="w")
+        self.txt_sources = tk.Text(sources_frame, wrap="word", height=8)
+        self.txt_sources.pack(fill="both", expand=True)
 
         frm_right_buttons = ttk.Frame(right_frame)
         frm_right_buttons.pack(fill="x")
@@ -104,6 +118,8 @@ class HeadingGUI(tk.Tk):
         ttk.Button(frm_right_buttons, text="Copy H1 + H2", command=self.copy_h1_h2).pack(side="left", padx=4)
         ttk.Button(frm_right_buttons, text="Copy H1 + H2 + H3", command=self.copy_h1_h2_h3).pack(side="left", padx=4)
         ttk.Button(frm_right_buttons, text="Copy Preview", command=self.copy_preview_for_selected_file).pack(side="left", padx=4)
+        ttk.Button(frm_right_buttons, text="Copy Sources", command=self.copy_sources).pack(side="left", padx=4)
+        ttk.Button(frm_right_buttons, text="Copy Source Summary", command=self.copy_source_summary).pack(side="left", padx=4)
 
         self.chk_write_docx_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -151,11 +167,18 @@ class HeadingGUI(tk.Tk):
         path = self.files[sel[0]]
         headings = extract_headings_from_docx(path)
         self.current_numbered = number_headings(headings)
+        entries = extract_headings_with_sources_from_docx(path)
+        self.current_sources = [
+            source for entry in entries for source in entry["sources"]
+        ]
 
         self.txt_preview.delete("1.0", tk.END)
+        self.txt_sources.delete("1.0", tk.END)
         for level, num, text in self.current_numbered:
             indent = "   " * (level - 1)
             self.txt_preview.insert(tk.END, f"{indent}{num}-{text}\n")
+
+        self.txt_sources.insert(tk.END, format_sources(self.current_sources))
 
     def copy_clean_filename(self):
         sel = self.lst_files.curselection()
@@ -170,6 +193,24 @@ class HeadingGUI(tk.Tk):
         if text:
             self.clipboard_clear()
             self.clipboard_append(text)
+
+    def copy_sources(self):
+        if not hasattr(self, "current_sources"):
+            return
+
+        text = self.txt_sources.get("1.0", tk.END).strip()
+        if text:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            messagebox.showinfo("Copied", "Sources copied")
+
+    def copy_source_summary(self):
+        if not hasattr(self, "current_sources"):
+            return
+
+        self.clipboard_clear()
+        self.clipboard_append(format_source_summary(self.current_sources))
+        messagebox.showinfo("Copied", "Source summary copied")
 
     def copy_h1_only(self):
         self._copy_by_max_level(1, "Heading-1 copied")

@@ -20,6 +20,9 @@ What it does
   1.1-Overview
   1.1.1-Goals
 - Copies selected heading levels to the clipboard.
+- Shows headings in the upper preview and source notes in a separate lower pane.
+- Groups lower-pane sources by source type and removes repeated source entries.
+- Copies a summary of unique sources, including the total and AI source count.
 - Exports the preview to a text file.
 - Optionally writes a numbered .docx document.
 
@@ -40,8 +43,9 @@ Command-line usage
 The core script supports a simple CLI flow:
 
 python copy_number_headings_core.py --src "C:\path\to\document.docx" --out "output" --write-docx
+python copy_number_headings_core.py --src "C:\path\to\document.docx" --out "output" --with-sources
 
-This reads the input .docx file, numbers headings, and writes an output folder with the generated files.
+This reads the input .docx file, numbers headings, and (with --with-sources) writes a text file that includes the source notes placed right after each heading.
 
 Notes
 -----
