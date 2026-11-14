@@ -4,13 +4,42 @@ Supports Heading 1 through Heading 9.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import argparse
 import re
 from docx import Document
+from docx.oxml.ns import qn
 
 MAX_LEVEL = 9
+
+
+def _heading_level(paragraph) -> Optional[int]:
+    style = paragraph.style
+    name = getattr(style, "name", "") if style is not None else ""
+
+    if name.startswith("Heading"):
+        parts = name.split()
+        level = int(parts[-1]) if len(parts) >= 2 and parts[-1].isdigit() else 1
+        return level if 1 <= level <= MAX_LEVEL else None
+
+    ppr = paragraph._p.pPr
+    outline_level = ppr.find(qn("w:outlineLvl")) if ppr is not None else None
+    if outline_level is not None:
+        value = outline_level.get(qn("w:val"))
+        if value is not None and value.isdigit():
+            level = int(value) + 1
+            return level if 1 <= level <= MAX_LEVEL else None
+
+    return None
+
+
+def _copy_outline_level(source, target) -> None:
+    source_ppr = source._p.pPr
+    outline_level = source_ppr.find(qn("w:outlineLvl")) if source_ppr is not None else None
+    if outline_level is not None:
+        target._p.get_or_add_pPr().append(deepcopy(outline_level))
 
 
 def extract_headings_from_docx(path: Path) -> List[Tuple[int, str]]:
@@ -18,22 +47,9 @@ def extract_headings_from_docx(path: Path) -> List[Tuple[int, str]]:
     headings: List[Tuple[int, str]] = []
 
     for p in doc.paragraphs:
-        style = p.style
-        if style is None:
-            continue
-
-        name = getattr(style, "name", "")
-        if not name:
-            continue
-
-        if name.startswith("Heading"):
-            parts = name.split()
-            level = 1
-            if len(parts) >= 2 and parts[-1].isdigit():
-                level = int(parts[-1])
-
-            if level <= MAX_LEVEL:
-                headings.append((level, p.text.strip()))
+        level = _heading_level(p)
+        if level is not None:
+            headings.append((level, p.text.strip()))
 
     return headings
 
@@ -72,18 +88,10 @@ def extract_headings_with_sources_from_docx(path: Path):
     current_index = None
 
     for p in doc.paragraphs:
-        style = p.style
-        name = getattr(style, "name", "") if style is not None else ""
-
-        if name.startswith("Heading"):
-            parts = name.split()
-            level = 1
-            if len(parts) >= 2 and parts[-1].isdigit():
-                level = int(parts[-1])
-
-            if level <= MAX_LEVEL:
-                entries.append({"level": level, "text": p.text.strip(), "sources": []})
-                current_index = len(entries) - 1
+        level = _heading_level(p)
+        if level is not None:
+            entries.append({"level": level, "text": p.text.strip(), "sources": []})
+            current_index = len(entries) - 1
             continue
 
         if current_index is not None:
@@ -100,6 +108,20 @@ def clean_heading_text(text: str) -> str:
     text = re.sub(r':\s*$', '', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
+
+
+def _numbered_heading_indices(headings: List[Tuple[int, str]]) -> List[int]:
+    level1_count = sum(1 for level, _ in headings if level == 1)
+    has_h3_or_more = any(level >= 3 for level, _ in headings)
+
+    if level1_count == 1 and has_h3_or_more:
+        return [i for i, (level, _) in enumerate(headings) if level != 1]
+    if level1_count == 1:
+        matching = [i for i, (level, _) in enumerate(headings) if level == 2]
+        if matching:
+            return matching
+        return [i for i, (level, _) in enumerate(headings) if level == 1]
+    return list(range(len(headings)))
 
 
 def number_headings(
@@ -162,17 +184,7 @@ def number_headings(
 def number_headings_with_sources(entries):
     raw_headings = [(entry["level"], entry["text"]) for entry in entries]
     numbered = number_headings(raw_headings)
-
-    level1_count = sum(1 for entry in entries if entry["level"] == 1)
-    has_h3_or_more = any(entry["level"] >= 3 for entry in entries)
-    if level1_count == 1 and has_h3_or_more:
-        matching_entries = [entry for entry in entries if entry["level"] != 1]
-    elif level1_count == 1:
-        matching_entries = [entry for entry in entries if entry["level"] == 2]
-        if not matching_entries:
-            matching_entries = [entry for entry in entries if entry["level"] == 1]
-    else:
-        matching_entries = entries
+    matching_entries = [entries[i] for i in _numbered_heading_indices(raw_headings)]
 
     result = []
     for (level, num, text), entry in zip(numbered, matching_entries):
@@ -244,21 +256,40 @@ def write_numbered_docx(original: Path, out_path: Path, numbered):
     doc = Document(original)
     new_doc = Document()
 
-    queues = {}
-    for lvl, num, text in numbered:
-        queues.setdefault(lvl, []).append((num, text))
+    heading_paragraphs = []
+    for i, paragraph in enumerate(doc.paragraphs):
+        level = _heading_level(paragraph)
+        if level is not None:
+            heading_paragraphs.append((i, level, paragraph))
+    heading_values = [
+        (level, paragraph.text.strip())
+        for _, level, paragraph in heading_paragraphs
+    ]
+    numbered_by_index = dict(
+        zip(_numbered_heading_indices(heading_values), numbered)
+    )
+    paragraph_heading_indices = {
+        paragraph_index: heading_index
+        for heading_index, (paragraph_index, _, _) in enumerate(heading_paragraphs)
+    }
 
-    for p in doc.paragraphs:
+    for paragraph_index, p in enumerate(doc.paragraphs):
         name = getattr(p.style, "name", "")
-        if name.startswith("Heading"):
-            parts = name.split()
-            lvl = int(parts[-1]) if parts[-1].isdigit() else 1
-
-            if lvl in queues and queues[lvl]:
-                num, text = queues[lvl].pop(0)
-                indent = "   " * (lvl - 1)
-                new_doc.add_paragraph(f"{indent}{num}-{text}", style=name)
+        level = _heading_level(p)
+        heading_index = paragraph_heading_indices.get(paragraph_index)
+        if heading_index is not None:
+            numbered_heading = numbered_by_index.get(heading_index)
+            if numbered_heading is not None:
+                numbered_level, num, text = numbered_heading
+                indent = "   " * (numbered_level - 1)
+                new_paragraph = new_doc.add_paragraph(f"{indent}{num}-{text}", style=name)
+                _copy_outline_level(p, new_paragraph)
                 continue
+
+            new_paragraph = new_doc.add_paragraph(p.text, style=name if name else None)
+            if level is not None:
+                _copy_outline_level(p, new_paragraph)
+            continue
 
         new_doc.add_paragraph(p.text, style=name if name else None)
 

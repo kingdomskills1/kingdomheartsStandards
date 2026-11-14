@@ -13,7 +13,7 @@ Files in this folder
 
 What it does
 ------------
-- Reads Word documents and finds paragraph styles such as Heading 1, Heading 2, etc.
+- Reads Word documents and finds Heading 1-9 styles and paragraphs marked with Word outline levels.
 - Removes existing numbering prefixes from titles.
 - Renumbers heading text in a clean hierarchical format like:
   1-Introduction
@@ -49,6 +49,6 @@ This reads the input .docx file, numbers headings, and (with --with-sources) wri
 
 Notes
 -----
-- The project is designed for heading styles built into Word documents.
-- It works best with standard Heading 1 through Heading 9 styles.
+- The project supports both built-in heading styles and directly assigned Word outline levels.
+- It works best with headings marked as Heading 1 through Heading 9 or outline levels 1 through 9.
 - Some cleanup is applied to remove generic numbering patterns and punctuation.
