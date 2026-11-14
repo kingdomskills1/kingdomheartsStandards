@@ -41,8 +41,9 @@ description kept as regular text. Standalone table equations are left-aligned.
 Internal ChatGPT layout tags such as `<box>`, `<row>`, and
 `<divider>` are omitted from exported text.
 ChatGPT's embedded images, including image groups,
-are downloaded and placed at their positions in the answer; citation markers
-and interactive follow-up suggestions are omitted. Classification breadcrumbs
+are downloaded and placed with their answer content; images in layout rows
+follow the row's text. Citation markers and interactive follow-up suggestions
+are omitted. Classification breadcrumbs
 are omitted from the title when the answer includes a recommended
 classification path. Documents are saved in the current Microsoft Word format
 to avoid Compatibility Mode. They use the reference layout's one-inch margins,

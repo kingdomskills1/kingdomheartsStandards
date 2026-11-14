@@ -1038,6 +1038,10 @@ def extract_latest_response(html):
 
 
 _IMAGE_PLACEHOLDER_RE = re.compile(r"<AsyncImage(?:Group)?\b[^>]*?/?>")
+_ROW_TAG_RE = re.compile(
+    r"(<row\b[^>]*>)(.*?)(</row\s*>)",
+    re.IGNORECASE | re.DOTALL,
+)
 _ENTITY_TAG_RE = re.compile(
     r"<Entity\b[^>]*?\bvalue\s*=\s*(?:\"([^\"]*)\"|'([^']*)')[^>]*?/>",
     re.IGNORECASE,
@@ -1058,7 +1062,19 @@ def _replace_entity_tags(text):
 
 
 def _normalize_image_placeholders(text):
-    """Collapse each (possibly multi-line) image tag onto its own single line."""
+    """Keep row images after their text and collapse each tag onto its own line."""
+    def move_row_images_after_content(match):
+        row_content = match.group(2)
+        image_tags = list(_IMAGE_PLACEHOLDER_RE.finditer(row_content))
+        if not image_tags:
+            return match.group(0)
+        content = _IMAGE_PLACEHOLDER_RE.sub("", row_content).rstrip()
+        if not content.strip() or image_tags[-1].end() == len(row_content.rstrip()):
+            return match.group(0)
+        images = "\n".join(image.group().strip() for image in image_tags)
+        return f"{match.group(1)}{content}\n{images}\n{match.group(3)}"
+
+    text = _ROW_TAG_RE.sub(move_row_images_after_content, text)
     return _IMAGE_PLACEHOLDER_RE.sub(
         lambda match: "\n" + re.sub(r"\s+", " ", match.group()).strip() + "\n",
         text,
