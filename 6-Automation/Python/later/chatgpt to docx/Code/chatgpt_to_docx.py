@@ -1430,6 +1430,45 @@ def _normalize_nary(math):
             nary.append(child)
 
 
+# LaTeX math alphabets -> Unicode "Mathematical Alphanumeric Symbols".
+# (upper_start, lower_start, digit_start, exceptions)
+_MATH_ALPHABETS = {
+    "mathcal": (0x1D49C, 0x1D4B6, None, {
+        "B": "\u212c", "E": "\u2130", "F": "\u2131", "H": "\u210b",
+        "I": "\u2110", "L": "\u2112", "M": "\u2133", "R": "\u211b",
+        "e": "\u212f", "g": "\u210a", "o": "\u2134",
+    }),
+    "mathbb": (0x1D538, 0x1D552, 0x1D7D8, {
+        "C": "\u2102", "H": "\u210d", "N": "\u2115", "P": "\u2119",
+        "Q": "\u211a", "R": "\u211d", "Z": "\u2124",
+    }),
+    "mathfrak": (0x1D504, 0x1D51E, None, {
+        "C": "\u212d", "H": "\u210c", "I": "\u2111", "R": "\u211c",
+        "Z": "\u2128",
+    }),
+    "mathsf": (0x1D5A0, 0x1D5BA, 0x1D7E2, {}),
+    "mathtt": (0x1D670, 0x1D68A, 0x1D7F6, {}),
+}
+_MATH_ALPHABETS["mathscr"] = _MATH_ALPHABETS["mathcal"]
+
+
+def _map_math_alphabet(text, command):
+    upper, lower, digit, exceptions = _MATH_ALPHABETS[command]
+    result = []
+    for character in text:
+        if character in exceptions:
+            result.append(exceptions[character])
+        elif "A" <= character <= "Z" and upper:
+            result.append(chr(upper + ord(character) - ord("A")))
+        elif "a" <= character <= "z" and lower:
+            result.append(chr(lower + ord(character) - ord("a")))
+        elif "0" <= character <= "9" and digit:
+            result.append(chr(digit + ord(character) - ord("0")))
+        else:
+            result.append(character)
+    return "".join(result)
+
+
 class _MathParser:
     COMMANDS = {
         "alpha": "α",
@@ -1882,6 +1921,20 @@ class _MathParser:
                     run.insert(0, properties)
                     return run
                 return content
+            if command in _MATH_ALPHABETS:
+                content = self._group()
+                for text_node in content.iter(f"{{{_MATH_NS}}}t"):
+                    text_node.text = _map_math_alphabet(
+                        text_node.text or "", command
+                    )
+                children = list(content)
+                if content.tag == f"{{{_MATH_NS}}}e":
+                    if len(children) == 1:
+                        return children[0]
+                    box = _math_element("box")
+                    box.append(content)
+                    return box
+                return content
             if command == "mathbf":
                 content = self._group()
                 math_namespace = (
@@ -2264,7 +2317,8 @@ def _add_inline_runs(
         )
     )
     token_pattern = re.compile(
-        r"(\\\(.+?\\\)|\\\[.+?\\\]|\$.+?\$|\*\*.+?\*\*|__.+?__|"
+        r"(\\\(.+?\\\)|\\\[.+?\\\]|\$.+?\$|\(\\[A-Za-z]+[^()]*\)|"
+        r"\*\*.+?\*\*|__.+?__|"
         r"(?<!\*)\*[^*]+\*(?!\*)|(?<!_)_[^_]+_(?!_)|`[^`]+`)"
     )
     position = 0
@@ -2295,6 +2349,14 @@ def _add_inline_runs(
                         "left" if table_math and not inline_table_math else None
                     ),
                 )
+        elif token.startswith("(\\") and token.endswith(")"):
+            for piece in ("(", None, ")"):
+                if piece is None:
+                    _add_math(paragraph, token[1:-1])
+                else:
+                    run = paragraph.add_run(piece)
+                    run.bold = bold
+                    run.italic = italic
         elif token.startswith("$"):
             expression = token[1:-1]
             if table_math:
