@@ -1513,6 +1513,7 @@ class _MathParser:
         "Psi": "Ψ",
         "cdot": "·",
         "cdots": "⋯",
+        "odot": "⊙",
         "dots": "…",
         "ldots": "…",
         "vdots": "⋮",
