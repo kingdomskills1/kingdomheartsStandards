@@ -176,22 +176,166 @@ class WordCopyPasteManager:
     def _preserve_inserted_fonts(self, source_doc, destination_doc, insertion_start):
         source_count = self._word_call(lambda: source_doc.Paragraphs.Count)
         destination_count = self._word_call(lambda: destination_doc.Paragraphs.Count)
-        source_paragraphs = []
+
+        def paragraph_text(paragraph):
+            return self._word_call(lambda: paragraph.Range.Text).rstrip("\r\x07").strip()
+
+        destination_content = self._word_call(lambda: destination_doc.Content)
+        destination_end = self._word_call(lambda: destination_content.End)
+        inserted_range = self._word_call(
+            lambda: destination_doc.Range(insertion_start, destination_end)
+        )
+        inserted_paragraphs = self._word_call(lambda: inserted_range.Paragraphs)
+        inserted_count = self._word_call(lambda: inserted_paragraphs.Count)
+
+        if source_count and inserted_count >= source_count:
+            source_first = self._word_call(lambda: source_doc.Paragraphs(1))
+            source_last = self._word_call(lambda: source_doc.Paragraphs(source_count))
+            destination_first = self._word_call(lambda: inserted_paragraphs(1))
+            destination_last = self._word_call(lambda: inserted_paragraphs(source_count))
+            is_aligned = (
+                self._word_call(lambda: destination_first.Range.Start) == insertion_start
+                and paragraph_text(source_first) == paragraph_text(destination_first)
+                and paragraph_text(source_last) == paragraph_text(destination_last)
+            )
+            if is_aligned:
+                source_fonts = [
+                    self._word_call(lambda: source_doc.Paragraphs(index).Range.Font.Name)
+                    for index in range(1, source_count + 1)
+                ]
+
+                def set_font_range(first_index, last_index, font_name):
+                    start = self._word_call(
+                        lambda: inserted_paragraphs(first_index).Range.Start
+                    )
+                    end = self._word_call(
+                        lambda: inserted_paragraphs(last_index).Range.End
+                    )
+                    self._word_call(
+                        lambda: setattr(destination_doc.Range(start, end).Font,
+                                        "Name", font_name)
+                    )
+
+                font_start = None
+                previous_font = None
+                for offset, source_font in enumerate(source_fonts, start=1):
+                    if isinstance(source_font, str) and source_font:
+                        if font_start is None:
+                            font_start, previous_font = offset, source_font
+                        elif source_font != previous_font:
+                            set_font_range(font_start, offset - 1, previous_font)
+                            font_start, previous_font = offset, source_font
+                    elif font_start is not None:
+                        set_font_range(font_start, offset - 1, previous_font)
+                        font_start = previous_font = None
+
+                if font_start is not None:
+                    set_font_range(font_start, source_count, previous_font)
+                return
+
+        def word_text_length(text):
+            return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+        def split_paragraphs(text, start):
+            paragraphs = []
+            position = start
+            text_index = 0
+            while text_index < len(text):
+                paragraph_end = text.find("\r", text_index)
+                if paragraph_end == -1:
+                    raw_text = text[text_index:]
+                    end = position + word_text_length(raw_text)
+                    paragraphs.append((raw_text.strip(), position, end))
+                    break
+
+                next_index = paragraph_end + 1
+                if next_index < len(text) and text[next_index] == "\x07":
+                    next_index += 1
+                raw_text = text[text_index:next_index]
+                end = position + word_text_length(raw_text)
+                paragraphs.append((raw_text.rstrip("\r\x07").strip(), position, end))
+                position = end
+                text_index = next_index
+            return paragraphs
+
+        source_content = self._word_call(lambda: source_doc.Content)
+        source_text = self._word_call(lambda: source_content.Text)
+        source_start = self._word_call(lambda: source_content.Start)
+        source_paragraphs = split_paragraphs(source_text, source_start)
+        if len(source_paragraphs) != source_count:
+            source_paragraphs = []
+            for index in range(1, source_count + 1):
+                paragraph = self._word_call(lambda: source_doc.Paragraphs(index))
+                text = self._word_call(lambda: paragraph.Range.Text).rstrip("\r\x07").strip()
+                source_paragraphs.append((text, 0, 0))
+
+        source_fonts = [
+            self._word_call(lambda: source_doc.Paragraphs(index).Range.Font.Name)
+            for index in range(1, source_count + 1)
+        ]
+        source_texts = [text for text, _, _ in source_paragraphs]
+
+        content_range = self._word_call(lambda: destination_doc.Content)
+        content_text = self._word_call(lambda: content_range.Text)
+        content_start = self._word_call(lambda: content_range.Start)
+        bulk_destination = split_paragraphs(content_text, content_start)
+
+        fast_destination = len(bulk_destination) == destination_count
+        if fast_destination:
+            candidates = [
+                index for index in range(destination_count - source_count + 1)
+                if [text for text, _, _ in bulk_destination[index:index + source_count]] == source_texts
+            ]
+            fast_destination = bool(candidates)
+
+        if fast_destination:
+            first_destination_paragraph = min(
+                candidates,
+                key=lambda index: abs(bulk_destination[index][1] - insertion_start)
+            )
+            actual_start = self._word_call(
+                lambda: destination_doc.Paragraphs(first_destination_paragraph + 1).Range.Start
+            )
+            fast_destination = actual_start == bulk_destination[first_destination_paragraph][1]
+
+        if fast_destination:
+            font_start = None
+            font_end = None
+            previous_font = None
+            for offset, source_font in enumerate(source_fonts):
+                if isinstance(source_font, str) and source_font:
+                    start, end = bulk_destination[first_destination_paragraph + offset][1:]
+                    if font_start is None:
+                        font_start, font_end, previous_font = start, end, source_font
+                    elif source_font == previous_font:
+                        font_end = end
+                    else:
+                        self._word_call(
+                            lambda: setattr(destination_doc.Range(font_start, font_end).Font,
+                                            "Name", previous_font)
+                        )
+                        font_start, font_end, previous_font = start, end, source_font
+                elif font_start is not None:
+                    self._word_call(
+                        lambda: setattr(destination_doc.Range(font_start, font_end).Font,
+                                        "Name", previous_font)
+                    )
+                    font_start = font_end = previous_font = None
+
+            if font_start is not None:
+                self._word_call(
+                    lambda: setattr(destination_doc.Range(font_start, font_end).Font,
+                                    "Name", previous_font)
+                )
+            return
+
         destination_paragraphs = []
-
-        for index in range(1, source_count + 1):
-            paragraph = self._word_call(lambda: source_doc.Paragraphs(index))
-            text = self._word_call(lambda: paragraph.Range.Text).rstrip("\r\x07").strip()
-            font = self._word_call(lambda: paragraph.Range.Font.Name)
-            source_paragraphs.append((text, font))
-
         for index in range(1, destination_count + 1):
             paragraph = self._word_call(lambda: destination_doc.Paragraphs(index))
             text = self._word_call(lambda: paragraph.Range.Text).rstrip("\r\x07").strip()
             start = self._word_call(lambda: paragraph.Range.Start)
             destination_paragraphs.append((text, start))
 
-        source_texts = [text for text, _ in source_paragraphs]
         candidates = [
             index for index in range(destination_count - source_count + 1)
             if [text for text, _ in destination_paragraphs[index:index + source_count]] == source_texts
@@ -203,7 +347,7 @@ class WordCopyPasteManager:
             candidates,
             key=lambda index: abs(destination_paragraphs[index][1] - insertion_start)
         )
-        for offset, (_, source_font) in enumerate(source_paragraphs):
+        for offset, source_font in enumerate(source_fonts):
             if isinstance(source_font, str) and source_font:
                 paragraph = destination_doc.Paragraphs(first_destination_paragraph + offset + 1)
                 self._word_call(lambda: setattr(paragraph.Range.Font, "Name", source_font))
