@@ -297,6 +297,34 @@ def write_numbered_docx(original: Path, out_path: Path, numbered):
     new_doc.save(out_path)
 
 
+def save_heading_level_changes(original: Path, out_path: Path, level_edits):
+    """Save heading-level edits to a copy or to the original document."""
+    doc = Document(original)
+    heading_paragraphs = [
+        p for p in doc.paragraphs
+        if _heading_level(p) is not None
+    ]
+
+    for heading_index, level in level_edits.items():
+        if heading_index < 0 or heading_index >= len(heading_paragraphs):
+            continue
+
+        paragraph = heading_paragraphs[heading_index]
+        paragraph.style = f"Heading {level}"
+
+        ppr = paragraph._p.get_or_add_pPr()
+        outline_level = ppr.find(qn("w:outlineLvl"))
+        if outline_level is not None:
+            ppr.remove(outline_level)
+        outline_level = ppr.makeelement(qn("w:outlineLvl"))
+        outline_level.set(qn("w:val"), str(level - 1))
+        ppr.append(outline_level)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(out_path)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--src", required=True)

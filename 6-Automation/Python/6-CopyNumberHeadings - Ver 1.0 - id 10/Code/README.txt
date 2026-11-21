@@ -21,6 +21,9 @@ What it does
   1.1.1-Goals
 - Copies selected heading levels to the clipboard.
 - Shows headings in the upper preview and source notes in a separate lower pane.
+- Provides Sources and Sources Summary views below the source preview, with right-click Copy Selected and Copy All actions.
+- Provides a View selector beside the heading controls; "Knowledge View" is the current heading display format.
+- Provides Headings, Sub Headings, and a nested Heading Level range menu inside the View menu.
 - Groups lower-pane sources by source type and removes repeated source entries.
 - Copies a summary of unique sources, including the total and AI source count.
 - Exports the preview to a text file.
