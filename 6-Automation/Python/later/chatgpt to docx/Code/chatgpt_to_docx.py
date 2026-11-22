@@ -1,5 +1,6 @@
 import base64
 import ctypes
+from concurrent.futures import ThreadPoolExecutor
 import html
 import io
 import json
@@ -1017,13 +1018,21 @@ def fetch_latest_response_with_images(url, skipped=None):
     """Returns (text, images). Anything skipped is described in `skipped`."""
     text, metadata = _fetch_response_record(url)
     images = []
-    for placeholder, image_url in _image_specs(text, metadata, skipped):
-        try:
-            images.append(_download_shared_image(placeholder, image_url))
-        except Exception as error:  # one bad image must not stop the document
-            print(f"[images] could not download an image: {error}")
-            if skipped is not None:
-                skipped.append(f"an image that failed to download ({error})")
+    image_specs = _image_specs(text, metadata, skipped)
+    if image_specs:
+        worker_count = min(4, len(image_specs))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(_download_shared_image, placeholder, image_url)
+                for placeholder, image_url in image_specs
+            ]
+            for future in futures:
+                try:
+                    images.append(future.result())
+                except Exception as error:  # one bad image must not stop the document
+                    print(f"[images] could not download an image: {error}")
+                    if skipped is not None:
+                        skipped.append(f"an image that failed to download ({error})")
     return text, images
 
 
@@ -3402,6 +3411,7 @@ def _build_chrome_options():
     if Options is None:
         return None
     chrome_options = Options()
+    chrome_options.page_load_strategy = "eager"
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--window-size=1600,1200")
     chrome_options.add_argument("--disable-gpu")
@@ -3537,13 +3547,19 @@ return {x: r.left + window.scrollX, y: r.top + window.scrollY,
 _WAIT_ASSETS_JS = """
 document.documentElement.style.setProperty('scroll-behavior', 'auto', 'important');
 document.body.style.setProperty('scroll-behavior', 'auto', 'important');
-const imgs = Array.from(document.images).filter(i => !i.complete);
+const target = arguments[0];
+const imgs = Array.from(document.images).filter(i => {
+  if (i.complete) return false;
+  if (target.contains(i)) return true;
+  // Later images cannot shift or affect this capture target.
+  return !(target.compareDocumentPosition(i) & Node.DOCUMENT_POSITION_FOLLOWING);
+});
 return imgs.length;
 """
 
 
 def _wait_for_stable_layout(driver, element, timeout=6.0):
-    """Wait until images have loaded and the table stops moving.
+    """Wait for images before or inside the target and its layout to stabilize.
 
     A photo above the table that finishes loading after the capture area was
     measured shifts the table, so the screenshot shows part of the photo and
@@ -3554,7 +3570,7 @@ def _wait_for_stable_layout(driver, element, timeout=6.0):
     stable = 0
     while time.time() < deadline:
         try:
-            pending = driver.execute_script(_WAIT_ASSETS_JS)
+            pending = driver.execute_script(_WAIT_ASSETS_JS, element)
             rect = driver.execute_script(_RECT_JS, element)
         except Exception:
             return
@@ -3750,7 +3766,7 @@ def _wait_for_page_content(
     driver,
     cancel_event=None,
     timeout=90,
-    stable_seconds=3.0,
+    stable_seconds=1.5,
     content_selector="table, [role='table']",
 ):
     script = """
