@@ -4462,7 +4462,7 @@ class ChatGPTToDocxApp:
             self.destination_entry.delete(0, tk.END)
             self.destination_entry.insert(0, destination)
 
-    def _show_copy_dialog(self, title, heading, body, copy_text=None):
+    def _show_copy_dialog(self, title, heading, body, copy_text=None, modal=True):
         """Dialog with selectable text and a Copy button (errors and warnings)."""
         copy_text = body if copy_text is None else copy_text
         dialog = tk.Toplevel(self.root)
@@ -4505,7 +4505,8 @@ class ChatGPTToDocxApp:
         # keep the text selectable (Ctrl+C works) but not editable
         details.bind("<Key>", lambda event: None if event.state & 0x4 else "break")
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
-        dialog.grab_set()
+        if modal:
+            dialog.grab_set()
         dialog.focus_set()
 
     def show_error_dialog(self, error):
@@ -4533,6 +4534,7 @@ class ChatGPTToDocxApp:
             "without the items listed above. Try converting again, or "
             "re-share the conversation, if you need them.",
             copy_text=f"Saved to: {destination}\n\n{message}",
+            modal=False,
         )
 
     def capture_table_from_url(self):
@@ -4769,11 +4771,6 @@ class ChatGPTToDocxApp:
                 _notify_windows(
                     "ChatGPT to Word - done", f"Saved {Path(destination).name}"
                 )
-            messagebox.showinfo(
-                "Conversion complete",
-                f"Word document saved to:\n{destination}",
-            )
-
 def main():
     _bind_children_to_process_lifetime()
     root = tk.Tk()

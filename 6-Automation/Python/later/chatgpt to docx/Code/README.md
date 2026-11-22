@@ -54,7 +54,9 @@ is inserted after a heading unless its next content is a subheading. Text,
 images, and tables between a heading and a later subheading do not prevent
 insertion after that heading. Leading conversation images appear after the
 pasted text beneath the main heading. An animated progress bar appears while
-the latest reply is fetched and converted.
+the latest reply is fetched and converted. After saving, the result appears in
+the status bar; warning details remain available in a non-modal window so the
+app can still be used without closing it.
 If no save location is entered, the document is saved to the
 Desktop using the main heading as its filename, or `chatgpt-response.docx`
 when no main heading is present.
