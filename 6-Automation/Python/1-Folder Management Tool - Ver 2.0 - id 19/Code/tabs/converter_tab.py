@@ -111,7 +111,7 @@ class ConverterTab:
 
         formats = {
             "image": ["png", "jpg", "jpeg", "webp", "bmp", "tiff"],
-            "video": ["mp4", "avi", "mkv", "mov", "webm"],
+            "video": ["mp4", "avi", "mkv", "mov", "webm", "ts"],
             "audio": ["mp3", "wav", "aac", "flac"],
             "doc": ["pdf", "txt", "docx", "html"]
         }
@@ -207,11 +207,13 @@ class ConverterTab:
                 **self._build_subprocess_kwargs()
             )
 
-            data = json.loads(probe.stdout)
+            if probe.returncode != 0:
+                raise RuntimeError(probe.stderr.strip() or "FFprobe could not read the input video")
 
-            duration = float(
-                data["format"]["duration"]
-            )
+            data = json.loads(probe.stdout or "{}")
+            duration = float(data.get("format", {}).get("duration") or 0)
+            if duration <= 0:
+                duration = None
 
             # FFMPEG COMMAND
             cmd = [
@@ -219,8 +221,12 @@ class ConverterTab:
                 "-i", src,
                 "-progress", "-",
                 "-y",
-                out
             ]
+
+            if ext.lower() == "ts":
+                cmd.extend(["-f", "mpegts"])
+
+            cmd.append(out)
 
             process = subprocess.Popen(
                 cmd,
@@ -245,8 +251,10 @@ class ConverterTab:
                     current = ms / 1_000_000
 
                     percent = (
-                        current / duration
-                    ) * 100
+                        (current / duration) * 100
+                        if duration is not None
+                        else 0
+                    )
 
                     self.root.after(
                         0,
@@ -256,8 +264,22 @@ class ConverterTab:
 
             process.wait()
 
+            if process.returncode != 0:
+                raise RuntimeError(f"FFmpeg failed with exit code {process.returncode}")
+
+            if not os.path.isfile(out) or os.path.getsize(out) == 0:
+                raise RuntimeError("FFmpeg did not create the output file")
+
         except Exception as e:
             print("Video error:", e)
+            self.root.after(
+                0,
+                lambda error=str(e):
+                messagebox.showerror(
+                    "Video Conversion Failed",
+                    f"{os.path.basename(src)}:\n{error}"
+                )
+            )
 
     def convert_audio(self, src):
 
