@@ -2,6 +2,7 @@ import base64
 import ctypes
 from concurrent.futures import ThreadPoolExecutor
 import html
+import importlib.util
 import io
 import json
 import os
@@ -85,6 +86,9 @@ _CONSOLE_CTRL_HANDLER = None
 _CONSOLE_CLOSED_CALLBACK = None
 _ACTIVE_DRIVERS = set()
 _ACTIVE_DRIVERS_LOCK = threading.Lock()
+_OUTPUT_LOCK = threading.Lock()
+_OUTPUT_PATHS_LOCK = threading.Lock()
+_WORD_COPY_LOCK = threading.Lock()
 _JOB_HANDLE = None
 
 
@@ -4033,7 +4037,7 @@ class ChatGPTToDocxApp:
         self.tray_icon = None
         self._tray_started = False
         root.title("ChatGPT to Word")
-        root.minsize(680, 500)
+        root.minsize(1120, 610)
         root.protocol("WM_DELETE_WINDOW", self.exit_app)
         global _CONSOLE_CLOSED_CALLBACK
         _CONSOLE_CLOSED_CALLBACK = self._on_console_closed
@@ -4042,46 +4046,117 @@ class ChatGPTToDocxApp:
         frame.grid(sticky="nsew")
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
-        frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(3, weight=1)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        frame.rowconfigure(3, weight=2)
 
-        ttk.Label(frame, text="ChatGPT share link:").grid(
-            row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 12)
-        )
         self._save_job = None
         self._autosave_ready = False
-        self.url_var = tk.StringVar()
-        self.destination_var = tk.StringVar()
-        self.url_entry = ttk.Entry(frame, width=58, textvariable=self.url_var)
-        self.url_entry.grid(row=0, column=1, sticky="ew", pady=(0, 12))
+        self._running_jobs = {}
+        self._copying_rows = set()
+        self._run_total = 0
+        self._run_completed = 0
+        self._run_items = []
+        self._run_statuses = {}
+        self._job_started_at = {}
+        self._duration_update_job = None
+        self._job_editor = None
+        self._job_buttons = {}
 
-        ttk.Label(frame, text="Save Word file to:").grid(
-            row=1, column=0, sticky="w", padx=(0, 10), pady=(0, 12)
+        jobs_toolbar = ttk.Frame(frame)
+        jobs_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(jobs_toolbar, text="Conversion jobs (double-click or type to edit):").pack(
+            side="left"
         )
-        self.destination_entry = ttk.Entry(frame, textvariable=self.destination_var)
-        self.destination_entry.grid(row=1, column=1, sticky="ew", pady=(0, 12))
-        ttk.Button(frame, text="Browse...", command=self.choose_destination).grid(
-            row=1, column=2, padx=(8, 0), pady=(0, 12)
+        self.add_job_button = ttk.Button(
+            jobs_toolbar, text="Add row", command=self.add_job
         )
+        self.add_job_button.pack(side="right")
+        self.remove_job_button = ttk.Button(
+            jobs_toolbar, text="Remove row(s)", command=self.remove_jobs
+        )
+        self.remove_job_button.pack(side="right", padx=(0, 6))
+        self.browse_destination_button = ttk.Button(
+            jobs_toolbar, text="Browse output...", command=self.choose_destination
+        )
+        self.browse_destination_button.pack(side="right", padx=(0, 6))
 
+        jobs_frame = ttk.Frame(frame)
+        jobs_frame.grid(row=1, column=0, sticky="nsew")
+        jobs_frame.columnconfigure(0, weight=1)
+        jobs_frame.rowconfigure(0, weight=1)
+        ttk.Style(root).configure("JobTable.Treeview", rowheight=28)
+        self.job_tree = ttk.Treeview(
+            jobs_frame,
+            columns=(
+                "url",
+                "destination",
+                "copy_destination",
+                "status",
+                "duration",
+                "convert",
+                "cancel",
+                "copy",
+            ),
+            show="headings",
+            selectmode="extended",
+            height=5,
+            style="JobTable.Treeview",
+        )
+        self.job_tree.heading("url", text="ChatGPT share link")
+        self.job_tree.heading("destination", text="Save Word file to")
+        self.job_tree.heading("copy_destination", text="Destination Word document")
+        self.job_tree.heading("status", text="Status")
+        self.job_tree.heading("duration", text="Time taken")
+        self.job_tree.heading("convert", text="Convert")
+        self.job_tree.heading("cancel", text="Cancel")
+        self.job_tree.column("url", width=250, minwidth=180, stretch=True)
+        self.job_tree.column("destination", width=170, minwidth=140, stretch=True)
+        self.job_tree.column("copy_destination", width=180, minwidth=140, stretch=True)
+        self.job_tree.column("status", width=100, minwidth=90, stretch=False)
+        self.job_tree.column("duration", width=90, minwidth=80, stretch=False)
+        self.job_tree.column("convert", width=78, minwidth=78, stretch=False)
+        self.job_tree.column("cancel", width=72, minwidth=72, stretch=False)
+        self.job_tree.column("copy", width=72, minwidth=72, stretch=False)
+        self.job_tree.grid(row=0, column=0, sticky="nsew")
+        self.jobs_y_scroll = ttk.Scrollbar(
+            jobs_frame, orient="vertical", command=self.job_tree.yview
+        )
+        self.jobs_y_scroll.grid(row=0, column=1, sticky="ns")
+        self.jobs_x_scroll = ttk.Scrollbar(
+            jobs_frame, orient="horizontal", command=self.job_tree.xview
+        )
+        self.jobs_x_scroll.grid(row=1, column=0, sticky="ew")
+        self.job_tree.configure(
+            yscrollcommand=self._on_job_tree_yview,
+            xscrollcommand=self._on_job_tree_xview,
+        )
+        self.job_tree.bind("<Double-1>", self._edit_job_cell)
+        self.job_tree.bind("<KeyPress>", self._type_to_edit_job_cell)
+        self.job_tree.bind("<Button-1>", self._remember_job_cell)
+        self.job_tree.bind("<Configure>", self._schedule_job_button_layout, add="+")
+
+        pasted_toolbar = ttk.Frame(frame)
+        pasted_toolbar.grid(row=2, column=0, sticky="ew", pady=(8, 4))
         ttk.Label(
-            frame,
+            pasted_toolbar,
             text="Formatted text after headings (skip headings with subheadings):",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 4))
-        clear_button_frame = ttk.Frame(frame)
-        clear_button_frame.grid(row=2, column=2, sticky="e", pady=(8, 4))
+        ).pack(side="left")
+        clear_button_frame = ttk.Frame(pasted_toolbar)
+        clear_button_frame.pack(side="right")
         ttk.Button(
             clear_button_frame,
             text="Clear",
             command=self.clear_pasted_text,
         ).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(
+        self.clear_all_button = ttk.Button(
             clear_button_frame,
             text="Clear all",
             command=self.clear_all_fields,
-        ).grid(row=0, column=1)
+        )
+        self.clear_all_button.grid(row=0, column=1)
         pasted_frame = ttk.Frame(frame)
-        pasted_frame.grid(row=3, column=0, columnspan=3, sticky="nsew")
+        pasted_frame.grid(row=3, column=0, sticky="nsew")
         pasted_frame.rowconfigure(0, weight=1)
         pasted_frame.columnconfigure(0, weight=1)
         self.pasted_text = tk.Text(
@@ -4107,15 +4182,44 @@ class ChatGPTToDocxApp:
         self.pasted_text.bind("<Shift-Insert>", self.paste_formatted_text)
         self.pasted_text.bind("<<Paste>>", self.paste_formatted_text)
         self.pasted_text.bind("<<Modified>>", self._on_pasted_text_modified)
-        self.url_var.trace_add("write", lambda *_args: self._schedule_save())
-        self.destination_var.trace_add("write", lambda *_args: self._schedule_save())
+
+        copy_destination_frame = ttk.Frame(frame)
+        copy_destination_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        copy_destination_frame.columnconfigure(1, weight=1)
+        ttk.Label(
+            copy_destination_frame,
+            text="Default destination Word document (must exist):",
+        ).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.copy_destination_default_var = tk.StringVar()
+        self.copy_destination_default_var.trace_add(
+            "write", lambda *_args: self._schedule_save()
+        )
+        self.copy_destination_default_entry = ttk.Entry(
+            copy_destination_frame,
+            textvariable=self.copy_destination_default_var,
+        )
+        self.copy_destination_default_entry.grid(row=0, column=1, sticky="ew")
+        self.copy_destination_default_entry.bind(
+            "<Return>",
+            self._apply_copy_destination_default,
+        )
+        self.copy_destination_default_entry.bind(
+            "<FocusOut>",
+            self._apply_copy_destination_default,
+        )
+        self.browse_copy_destination_button = ttk.Button(
+            copy_destination_frame,
+            text="Browse...",
+            command=self.choose_copy_destination_default,
+        )
+        self.browse_copy_destination_button.grid(row=0, column=2, padx=(8, 0))
 
         self.console_button = ttk.Button(
             frame,
             text="Open console",
             command=self.open_console,
         )
-        self.console_button.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        self.console_button.grid(row=5, column=0, sticky="w", pady=(10, 0))
         self.notify_var = tk.BooleanVar(value=True)
         self.notify_var.trace_add("write", lambda *_args: self._schedule_save())
         self.notify_check = ttk.Checkbutton(
@@ -4123,35 +4227,280 @@ class ChatGPTToDocxApp:
             text="Notify me in Windows when done",
             variable=self.notify_var,
         )
-        self.notify_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.notify_check.grid(row=8, column=0, sticky="w", pady=(10, 0))
         self.convert_button = ttk.Button(
-            frame, text="Convert latest reply", command=self.convert
+            frame, text="Convert all rows", command=self.convert
         )
-        self.convert_button.grid(row=4, column=1, sticky="e", pady=(10, 0))
+        self.convert_button.grid(row=5, column=0, sticky="e", pady=(10, 0))
         self.cancel_button = ttk.Button(
             frame,
-            text="Cancel",
+            text="Cancel all",
             command=self.cancel_conversion,
             state="disabled",
         )
-        self.cancel_button.grid(row=4, column=2, sticky="e", pady=(10, 0))
+        self.cancel_button.grid(row=5, column=0, sticky="e", padx=(0, 100), pady=(10, 0))
         self.progress = ttk.Progressbar(
             frame,
             mode="determinate",
             maximum=100,
             value=0,
         )
-        self.progress.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        self.progress.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         self.progress.grid_remove()
         self.status = ttk.Label(frame, text="Only public ChatGPT share links are supported.")
-        self.status.grid(row=6, column=0, columnspan=3, sticky="w", pady=(12, 0))
-        self._cancel_event = threading.Event()
+        self.status.grid(row=7, column=0, sticky="w", pady=(12, 0))
+        self.add_job()
         self.restore_state()
+        self._schedule_job_button_layout()
         try:
             self.pasted_text.edit_modified(False)
         except tk.TclError:
             pass
         self._autosave_ready = True
+
+    def add_job(self):
+        default_copy_destination = self._normalize_copy_destination(
+            self.copy_destination_default_var.get()
+        )
+        item = self.job_tree.insert(
+            "",
+            "end",
+            values=("", "", default_copy_destination, "", "", "", "", ""),
+        )
+        self.job_tree.selection_set(item)
+        self.job_tree.focus(item)
+        self._schedule_save()
+        self.root.after_idle(self._start_job_cell_edit, item, "#1")
+        self._schedule_job_button_layout()
+
+    def _normalize_output_path(self, destination):
+        destination = destination.strip()
+        if not destination:
+            return ""
+        path = Path(destination)
+        if not path.is_absolute():
+            path = Path.home() / "Desktop" / path
+        if not path.suffix:
+            path = path.with_suffix(".docx")
+        return str(path)
+
+    def _normalize_copy_destination(self, destination):
+        destination = destination.strip()
+        if not destination:
+            return ""
+        path = Path(destination).expanduser()
+        if not path.is_absolute():
+            path = Path.home() / "Desktop" / path
+        if not path.suffix:
+            path = path.with_suffix(".docx")
+        return str(path)
+
+    def _row_is_busy(self, item):
+        return item in self._running_jobs or item in self._copying_rows
+
+    def remove_jobs(self):
+        selected = self.job_tree.selection()
+        removable = [item for item in selected if not self._row_is_busy(item)]
+        running = [item for item in selected if self._row_is_busy(item)]
+        if not removable:
+            self.status.configure(
+                text=(
+                    "Rows processing a conversion or copy cannot be removed until they finish."
+                    if running
+                    else "Select a row to remove."
+                )
+            )
+            return
+        for item in removable:
+            self.job_tree.delete(item)
+            buttons = self._job_buttons.pop(item, {})
+            for button in buttons.values():
+                button.destroy()
+        if not self.job_tree.get_children():
+            self.job_tree.insert("", "end", values=("", "", "", "", "", "", "", ""))
+        if running:
+            self.status.configure(
+                text="Removed finished rows. Running rows remain until they finish or are cancelled."
+            )
+        self._schedule_save()
+        self._schedule_job_button_layout()
+
+    def _on_job_tree_yview(self, first, last):
+        self.jobs_y_scroll.set(first, last)
+        self._schedule_job_button_layout()
+
+    def _on_job_tree_xview(self, first, last):
+        self.jobs_x_scroll.set(first, last)
+        self._schedule_job_button_layout()
+
+    def _schedule_job_button_layout(self, _event=None):
+        try:
+            self.root.after_idle(self._position_job_buttons)
+        except tk.TclError:
+            pass
+
+    def _position_job_buttons(self):
+        items = self.job_tree.get_children()
+        item_set = set(items)
+        for item in tuple(self._job_buttons):
+            if item not in item_set:
+                for button in self._job_buttons.pop(item).values():
+                    button.destroy()
+        for item in items:
+            buttons = self._job_buttons.get(item)
+            if buttons is None:
+                buttons = {
+                    "convert": ttk.Button(
+                        self.job_tree,
+                        text="Convert",
+                        command=lambda job_id=item: self.convert_job(job_id),
+                    ),
+                    "cancel": ttk.Button(
+                        self.job_tree,
+                        text="Cancel",
+                        command=lambda job_id=item: self.cancel_job(job_id),
+                    ),
+                    "copy": ttk.Button(
+                        self.job_tree,
+                        text="Copy",
+                        command=lambda job_id=item: self.copy_job(job_id),
+                    ),
+                }
+                self._job_buttons[item] = buttons
+            cancel_event = self._running_jobs.get(item)
+            status = self.job_tree.set(item, "status")
+            copy_destination = self.job_tree.set(item, "copy_destination").strip()
+            buttons["convert"].configure(
+                state="disabled" if self._row_is_busy(item) else "normal"
+            )
+            buttons["cancel"].configure(
+                text="Cancel..." if cancel_event and cancel_event.is_set() else "Cancel",
+                state=(
+                    "normal"
+                    if cancel_event is not None and not cancel_event.is_set()
+                    else "disabled"
+                ),
+            )
+            buttons["copy"].configure(
+                state=(
+                    "normal"
+                    if status
+                    in {
+                        "Saved",
+                        "Saved with warnings",
+                        "Copied",
+                        "Copied with warnings",
+                        "Copy failed",
+                    }
+                    and copy_destination
+                    and not self._row_is_busy(item)
+                    else "disabled"
+                )
+            )
+            for column, button in buttons.items():
+                bbox = self.job_tree.bbox(item, column)
+                if not bbox:
+                    button.place_forget()
+                    continue
+                x, y, width, height = bbox
+                button.place(x=x, y=y, width=width, height=height)
+
+    def _remember_job_cell(self, event):
+        column = self.job_tree.identify_column(event.x)
+        self._last_job_column = column if column in ("#1", "#2", "#3") else "#1"
+
+    def _edit_job_cell(self, event):
+        item = self.job_tree.identify_row(event.y)
+        column = self.job_tree.identify_column(event.x)
+        if item and not self._row_is_busy(item) and column in ("#1", "#2", "#3"):
+            self.job_tree.selection_set(item)
+            self.job_tree.focus(item)
+            self._last_job_column = column
+            self._start_job_cell_edit(item, column)
+        return "break"
+
+    def _type_to_edit_job_cell(self, event):
+        if not event.char or not event.char.isprintable() or event.state & 0x4:
+            return
+        selection = self.job_tree.selection()
+        if not selection:
+            return
+        if self._row_is_busy(selection[0]):
+            return "break"
+        column = getattr(self, "_last_job_column", "#1")
+        if column not in ("#1", "#2", "#3"):
+            column = "#1"
+        self._start_job_cell_edit(selection[0], column, event.char)
+        return "break"
+
+    def _start_job_cell_edit(self, item, column, initial_text=None):
+        if self._row_is_busy(item) or not self.job_tree.exists(item):
+            return
+        if self._job_editor is not None:
+            self._job_editor.destroy()
+        bbox = self.job_tree.bbox(item, column)
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        entry = ttk.Entry(self.job_tree)
+        entry.place(x=x, y=y, width=width, height=height)
+        current = self.job_tree.set(item, column)
+        entry.insert(0, current if initial_text is None else initial_text)
+        if initial_text is None:
+            entry.selection_range(0, tk.END)
+        self._job_editor = entry
+
+        def finish(commit=True, move=False):
+            if self._job_editor is not entry:
+                return
+            value = entry.get()
+            entry.destroy()
+            self._job_editor = None
+            if commit and self.job_tree.exists(item):
+                if column == "#2":
+                    value = self._normalize_output_path(value)
+                elif column == "#3":
+                    value = self._normalize_copy_destination(value)
+                self.job_tree.set(item, column, value)
+                self._schedule_save()
+                self._schedule_job_button_layout()
+            if move:
+                self._move_to_next_job_cell(item, column)
+
+        def finish_and_break(_event):
+            finish()
+            return "break"
+
+        def cancel_and_break(_event):
+            finish(commit=False)
+            return "break"
+
+        def finish_and_move(_event):
+            finish(move=True)
+            return "break"
+
+        entry.bind("<Return>", finish_and_break)
+        entry.bind("<Escape>", cancel_and_break)
+        entry.bind("<FocusOut>", lambda _event: finish())
+        entry.bind("<Tab>", finish_and_move)
+        entry.focus_set()
+
+    def _move_to_next_job_cell(self, item, column):
+        items = list(self.job_tree.get_children())
+        if not items:
+            return
+        columns = ["#1", "#2", "#3"]
+        item_index = items.index(item) if item in items else 0
+        column_index = columns.index(column)
+        if column_index + 1 < len(columns):
+            next_item, next_column = items[item_index], columns[column_index + 1]
+        else:
+            next_index = (item_index + 1) % len(items)
+            next_item, next_column = items[next_index], columns[0]
+        self.job_tree.selection_set(next_item)
+        self.job_tree.focus(next_item)
+        self._last_job_column = next_column
+        self._start_job_cell_edit(next_item, next_column)
 
     def _schedule_save(self, delay_ms=400):
         """Autosave shortly after any change so nothing is lost if the program
@@ -4203,8 +4552,18 @@ class ChatGPTToDocxApp:
                     )
                 serialized.append({"runs": runs})
             payload = {
-                "url": self.url_entry.get().strip(),
-                "destination": self.destination_entry.get().strip(),
+                "jobs": [
+                    {
+                        "url": values[0],
+                        "destination": values[1],
+                        "copy_destination": values[2],
+                        "status": values[3],
+                        "duration": values[4],
+                    }
+                    for item in self.job_tree.get_children()
+                    for values in (self.job_tree.item(item, "values"),)
+                ],
+                "copy_destination_default": self.copy_destination_default_var.get(),
                 "notify": bool(self.notify_var.get()),
                 "paragraphs": serialized,
             }
@@ -4225,14 +4584,58 @@ class ChatGPTToDocxApp:
             return
         if not isinstance(payload, dict):
             return
-        url = payload.get("url", "")
-        destination = payload.get("destination", "")
+        default_copy_destination = self._normalize_copy_destination(
+            str(payload.get("copy_destination_default", ""))
+        )
+        self.copy_destination_default_var.set(default_copy_destination)
+        jobs = payload.get("jobs")
+        if not isinstance(jobs, list):
+            jobs = [
+                {
+                    "url": payload.get("url", ""),
+                    "destination": payload.get("destination", ""),
+                }
+            ]
         paragraphs = payload.get("paragraphs", [])
         self.notify_var.set(bool(payload.get("notify", True)))
-        if url:
-            self.url_entry.insert(0, url)
-        if destination:
-            self.destination_entry.insert(0, destination)
+        for item in self.job_tree.get_children():
+            self.job_tree.delete(item)
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            status = str(job.get("status", ""))
+            if status in {
+                "Queued",
+                "Fetching",
+                "Capturing screenshots",
+                "Saving",
+                "Cancelling",
+            }:
+                status = "Cancelled"
+            elif status == "Copying":
+                status = "Copy failed"
+            copy_destination = job.get(
+                "copy_destination",
+                default_copy_destination,
+            )
+            self.job_tree.insert(
+                "",
+                "end",
+                values=(
+                    str(job.get("url", "")),
+                    self._normalize_output_path(str(job.get("destination", ""))),
+                    self._normalize_copy_destination(str(copy_destination)),
+                    status,
+                    str(job.get("duration", "")),
+                    "",
+                    "",
+                    "",
+                ),
+            )
+        if not self.job_tree.get_children():
+            self.add_job()
+        if default_copy_destination:
+            self._apply_copy_destination_default()
         if paragraphs:
             restored = []
             for paragraph in paragraphs:
@@ -4321,10 +4724,7 @@ class ChatGPTToDocxApp:
 
     def exit_app(self):
         """Fully quit: stop work, close Chrome, remove tray icon, end the process."""
-        try:
-            self._cancel_event.set()
-        except Exception:
-            pass
+        self._cancel_running_jobs()
         try:
             self.save_state()
         except Exception:
@@ -4342,13 +4742,80 @@ class ChatGPTToDocxApp:
             pass
         _force_exit()
 
+    def _cancel_running_jobs(self):
+        for item, cancel_event in self._running_jobs.items():
+            cancel_event.set()
+            if self.job_tree.exists(item):
+                self.job_tree.set(item, "status", "Cancelled")
+                self._record_job_duration(item)
+        for item in self._copying_rows:
+            if self.job_tree.exists(item):
+                self.job_tree.set(item, "status", "Copy failed")
+        self._copying_rows.clear()
+        self._stop_duration_updates()
+        self._schedule_job_button_layout()
+
+    def _format_elapsed_duration(self, elapsed):
+        elapsed = max(0.0, elapsed)
+        whole_seconds = int(elapsed)
+        if whole_seconds < 60:
+            return f"{elapsed:.1f} s"
+        hours, remainder = divmod(whole_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours} h {minutes:02} m {seconds:02} s"
+        return f"{minutes} m {seconds:02} s"
+
+    def _record_job_duration(self, item):
+        started_at = self._job_started_at.pop(item, None)
+        if started_at is None or not self.job_tree.exists(item):
+            return
+        self.job_tree.set(
+            item,
+            "duration",
+            self._format_elapsed_duration(time.monotonic() - started_at),
+        )
+
+    def _schedule_duration_updates(self):
+        if self._duration_update_job is None and self._running_jobs:
+            self._duration_update_job = self.root.after(
+                500,
+                self._update_running_durations,
+            )
+
+    def _update_running_durations(self):
+        self._duration_update_job = None
+        now = time.monotonic()
+        for item in self._running_jobs:
+            started_at = self._job_started_at.get(item)
+            if started_at is not None and self.job_tree.exists(item):
+                self.job_tree.set(
+                    item,
+                    "duration",
+                    self._format_elapsed_duration(now - started_at),
+                )
+        self._schedule_duration_updates()
+
+    def _stop_duration_updates(self):
+        if self._duration_update_job is None:
+            return
+        try:
+            self.root.after_cancel(self._duration_update_job)
+        except tk.TclError:
+            pass
+        self._duration_update_job = None
+
     def clear_pasted_text(self):
         self.pasted_text.delete("1.0", "end")
         self.pasted_text.focus_set()
 
     def clear_all_fields(self):
-        self.url_entry.delete(0, tk.END)
-        self.destination_entry.delete(0, tk.END)
+        if self._running_jobs or self._copying_rows:
+            return
+        for item in self.job_tree.get_children():
+            self.job_tree.delete(item)
+        self.copy_destination_default_var.set("")
+        self.add_job()
         self.clear_pasted_text()
         self.status.configure(text="All fields cleared.")
 
@@ -4468,15 +4935,236 @@ class ChatGPTToDocxApp:
             self.status.configure(text="Console is unavailable in this environment.")
 
     def choose_destination(self):
+        selection = self.job_tree.selection()
+        if not selection:
+            messagebox.showwarning(
+                "Select a job",
+                "Select a job row before choosing an output file.",
+            )
+            return
+        item = selection[0]
+        if self._row_is_busy(item):
+            messagebox.showwarning(
+                "Job is running",
+                "Wait for this row to finish before changing its path.",
+            )
+            return
         destination = filedialog.asksaveasfilename(
             title="Save Word document",
             defaultextension=".docx",
             filetypes=[("Word document", "*.docx")],
-            initialfile="chatgpt-response.docx",
+            initialfile=Path(self.job_tree.set(item, "destination")).name
+            if self.job_tree.set(item, "destination")
+            else "chatgpt-response.docx",
         )
         if destination:
-            self.destination_entry.delete(0, tk.END)
-            self.destination_entry.insert(0, destination)
+            self.job_tree.set(item, "destination", destination)
+            self._schedule_save()
+
+    def _apply_copy_destination_default(self, _event=None):
+        destination = self._normalize_copy_destination(
+            self.copy_destination_default_var.get()
+        )
+        if destination:
+            self.copy_destination_default_var.set(destination)
+            for item in self.job_tree.get_children():
+                if (
+                    not self.job_tree.set(item, "copy_destination").strip()
+                    and not self._row_is_busy(item)
+                ):
+                    self.job_tree.set(item, "copy_destination", destination)
+        self._schedule_job_button_layout()
+        self._schedule_save()
+        return "break"
+
+    def choose_copy_destination_default(self):
+        current = self.copy_destination_default_var.get().strip()
+        initial_directory = Path(current).parent if current else Path.home()
+        if not initial_directory.is_dir():
+            initial_directory = Path.home()
+        destination = filedialog.askopenfilename(
+            title="Choose existing destination Word document",
+            filetypes=[
+                ("Word documents", "*.docx;*.doc;*.docm"),
+                ("All files", "*.*"),
+            ],
+            initialdir=str(initial_directory),
+        )
+        if destination:
+            self.copy_destination_default_var.set(destination)
+            self._apply_copy_destination_default()
+
+    def copy_job(self, item):
+        if self._row_is_busy(item) or not self.job_tree.exists(item):
+            return
+        if self.job_tree.set(item, "status") not in {
+            "Saved",
+            "Saved with warnings",
+            "Copied",
+            "Copied with warnings",
+            "Copy failed",
+        }:
+            messagebox.showwarning(
+                "Conversion not finished",
+                "Copy is available after this row's conversion finishes.",
+            )
+            return
+
+        source = Path(self.job_tree.set(item, "destination"))
+        raw_destination = self.job_tree.set(item, "copy_destination").strip()
+        destination = self._normalize_copy_destination(raw_destination)
+        if not destination:
+            messagebox.showwarning(
+                "Missing destination document",
+                "Set the default destination Word document below the formatted text or enter one in this row.",
+            )
+            return
+        self.job_tree.set(item, "copy_destination", destination)
+        if not source.is_file():
+            self._finish_copy(
+                item,
+                None,
+                FileNotFoundError(f"Converted Word file was not found: {source}"),
+                None,
+            )
+            return
+        destination_path = Path(destination)
+        if not destination_path.is_file():
+            self._finish_copy(
+                item,
+                destination,
+                FileNotFoundError(
+                    f"Destination Word document was not found: {destination_path}"
+                ),
+                None,
+            )
+            return
+        if os.path.abspath(source).lower() == os.path.abspath(destination_path).lower():
+            self._finish_copy(
+                item,
+                destination,
+                ValueError("Source and destination must be different documents."),
+                None,
+            )
+            return
+        self._copying_rows.add(item)
+        self.job_tree.set(item, "status", "Copying")
+        self.clear_all_button.configure(state="disabled")
+        self.status.configure(text=f"Inserting {source.name} into {destination_path.name}...")
+        self._schedule_job_button_layout()
+        self._schedule_save()
+        worker = threading.Thread(
+            target=self._copy_word_document_in_background,
+            args=(item, source, destination_path),
+            daemon=True,
+        )
+        worker.start()
+
+    def _copy_word_document_in_background(self, item, source, destination):
+        try:
+            with _WORD_COPY_LOCK:
+                manager_path = (
+                    Path(__file__).resolve().parent
+                    / "word_document_insertion"
+                    / "word_document_inserter.py"
+                )
+                if not manager_path.is_file() and getattr(sys, "frozen", False):
+                    executable_directory = Path(sys.executable).resolve().parent
+                    candidates = (
+                        executable_directory
+                        / "word_document_insertion"
+                        / "word_document_inserter.py",
+                        executable_directory.parent
+                        / "Code"
+                        / "word_document_insertion"
+                        / "word_document_inserter.py",
+                    )
+                    manager_path = next(
+                        (candidate for candidate in candidates if candidate.is_file()),
+                        manager_path,
+                    )
+                if not manager_path.is_file():
+                    raise FileNotFoundError(
+                        "Word document insertion engine "
+                        "word_document_inserter.py "
+                        f"was not found at {manager_path}."
+                    )
+                spec = importlib.util.spec_from_file_location(
+                    "_chatgpt_word_document_inserter",
+                    manager_path,
+                )
+                if spec is None or spec.loader is None:
+                    raise ImportError(
+                        f"Could not load the Word document insertion engine from {manager_path}."
+                    )
+                manager_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(manager_module)
+                manager = manager_module.WordDocumentInserter()
+                numbering_repair_supported = manager.copy_document_paths(
+                    str(source),
+                    str(destination),
+                )
+        except ModuleNotFoundError as error:
+            if error.name in {"pythoncom", "pywintypes", "win32com"}:
+                error = RuntimeError(
+                    "Word integration requires pywin32. Install it with "
+                    "`python -m pip install pywin32`, then restart the app."
+                )
+            self.root.after(0, self._finish_copy, item, str(destination), error, None)
+        except Exception as error:
+            self.root.after(0, self._finish_copy, item, str(destination), error, None)
+        else:
+            self.root.after(
+                0,
+                self._finish_copy,
+                item,
+                str(destination),
+                None,
+                numbering_repair_supported,
+            )
+
+    def _finish_copy(self, item, destination, error, numbering_repair_supported):
+        self._copying_rows.discard(item)
+        if error is not None:
+            self.job_tree.set(item, "status", "Copy failed")
+            self.status.configure(text="Word document insertion failed.")
+            self._show_copy_dialog(
+                "Could not insert Word document",
+                "The Word document could not be inserted. Click \"Copy error\" to copy the details:",
+                f"{type(error).__name__}: {error}",
+                modal=False,
+            )
+            if self.notify_var.get():
+                _notify_windows("Word document insertion failed", str(error)[:180])
+        else:
+            final_status = (
+                "Copied" if numbering_repair_supported else "Copied with warnings"
+            )
+            self.job_tree.set(item, "status", final_status)
+            self.status.configure(
+                text=f"Inserted {Path(self.job_tree.set(item, 'destination')).name} "
+                f"into {Path(destination).name} and saved."
+            )
+            if not numbering_repair_supported:
+                self._show_copy_dialog(
+                    "Numbering may differ",
+                    "The document was inserted and saved, but automatic list-numbering repair "
+                    "is available only when both documents are .docx or .docm files.",
+                    "The destination is a legacy Word document. For reliable numbered-list "
+                    "restarts, use a .docx or .docm destination.",
+                    modal=False,
+                )
+            if self.notify_var.get():
+                _notify_windows(
+                    "Word document inserted",
+                    f"Inserted into {Path(destination).name}."
+                    if numbering_repair_supported
+                    else f"Inserted into {Path(destination).name}; numbering may differ.",
+                )
+        self._schedule_save()
+        self._schedule_job_button_layout()
+        if not self._running_jobs and not self._copying_rows:
+            self.clear_all_button.configure(state="normal")
 
     def _show_copy_dialog(self, title, heading, body, copy_text=None, modal=True):
         """Dialog with selectable text and a Copy button (errors and warnings)."""
@@ -4525,7 +5213,7 @@ class ChatGPTToDocxApp:
             dialog.grab_set()
         dialog.focus_set()
 
-    def show_error_dialog(self, error):
+    def show_error_dialog(self, error, modal=True):
         import traceback
 
         error_text = f"{type(error).__name__}: {error}"
@@ -4538,6 +5226,7 @@ class ChatGPTToDocxApp:
             "Could not convert link",
             "The conversion failed. Click \"Copy error\" and send it if you need help:",
             full_text,
+            modal=modal,
         )
 
     def show_warning_dialog(self, destination, warnings):
@@ -4606,35 +5295,160 @@ class ChatGPTToDocxApp:
             self.status.configure(text=text)
 
     def cancel_conversion(self):
-        if not self._cancel_event.is_set():
-            self._cancel_event.set()
+        if self._running_jobs:
+            for item, cancel_event in self._running_jobs.items():
+                cancel_event.set()
+                self.job_tree.set(item, "status", "Cancelling")
             self.cancel_button.configure(state="disabled")
             self.status.configure(text="Cancelling conversion...")
+            self._schedule_job_button_layout()
+            self._schedule_save()
+
+    def cancel_job(self, item):
+        cancel_event = self._running_jobs.get(item)
+        if cancel_event is None or cancel_event.is_set():
+            return
+        cancel_event.set()
+        self.job_tree.set(item, "status", "Cancelling")
+        filename = Path(self.job_tree.set(item, "destination")).name
+        self.status.configure(
+            text=f"Cancelling {filename or 'selected job'}..."
+        )
+        self._schedule_job_button_layout()
+        self._schedule_save()
 
     def convert(self):
-        if self._cancel_event.is_set():
-            self._cancel_event.clear()
-        url = self.url_entry.get().strip()
-        destination = self.destination_entry.get().strip()
-        heading_content = self._pasted_text_content()
+        jobs = []
+        for item in self.job_tree.get_children():
+            if self._row_is_busy(item):
+                continue
+            url = self.job_tree.set(item, "url").strip()
+            destination = self._normalize_output_path(
+                self.job_tree.set(item, "destination")
+            )
+            if url:
+                jobs.append((item, url, destination))
+        if not jobs:
+            if not self._running_jobs and not self._copying_rows:
+                messagebox.showwarning(
+                    "Missing link",
+                    "Enter a ChatGPT share link in at least one table row.",
+                )
+            return
+        self._start_jobs(jobs)
 
-        self.convert_button.configure(state="disabled")
-        self.cancel_button.configure(state="normal")
-        self._set_progress(0, "Fetching the latest reply...")
-        self.progress.grid()
-        worker = threading.Thread(
-            target=self._convert_in_background,
-            args=(url, destination, heading_content),
-            daemon=True,
+    def convert_job(self, item):
+        if self._row_is_busy(item) or not self.job_tree.exists(item):
+            return
+        url = self.job_tree.set(item, "url").strip()
+        if not url:
+            messagebox.showwarning(
+                "Missing link",
+                "Enter a ChatGPT share link in this row before converting it.",
+            )
+            return
+        self._start_jobs(
+            [
+                (
+                    item,
+                    url,
+                    self._normalize_output_path(
+                        self.job_tree.set(item, "destination")
+                    ),
+                )
+            ]
         )
-        worker.start()
 
-    def _convert_in_background(self, url, destination, heading_content):
+    def _start_jobs(self, jobs):
+        new_run = not self._running_jobs
+        if new_run:
+            self._run_total = 0
+            self._run_completed = 0
+            self._run_items = []
+            self._run_statuses = {}
+            with _OUTPUT_PATHS_LOCK:
+                self._reserved_output_paths = set()
+
+        duplicates = set()
+        with _OUTPUT_PATHS_LOCK:
+            destination_rows = {}
+            for item, _url, destination in jobs:
+                if destination:
+                    normalized = os.path.normcase(os.path.abspath(destination))
+                    destination_rows.setdefault(normalized, []).append(item)
+            for destination, items in destination_rows.items():
+                if destination in self._reserved_output_paths or len(items) > 1:
+                    duplicates.update(items)
+            jobs = [job for job in jobs if job[0] not in duplicates]
+            for _item, _url, destination in jobs:
+                if destination:
+                    self._reserved_output_paths.add(
+                        os.path.normcase(os.path.abspath(destination))
+                    )
+
+        for item in duplicates:
+            self.job_tree.set(item, "status", "Duplicate output path")
+        if duplicates:
+            messagebox.showwarning(
+                "Duplicate output paths",
+                "Rows with an output path already in use were skipped. "
+                "Choose a different output file for each row.",
+            )
+        if not jobs:
+            return
+
+        heading_content = self._pasted_text_content()
+        self._run_total += len(jobs)
+        self._run_items.extend(item for item, _url, _destination in jobs)
+        self.cancel_button.configure(state="normal")
+        self.clear_all_button.configure(state="disabled")
+        self.progress.configure(
+            value=100 * self._run_completed / max(self._run_total, 1)
+        )
+        self.progress.grid()
+        for item, url, destination in jobs:
+            cancel_event = threading.Event()
+            self._running_jobs[item] = cancel_event
+            self._job_started_at[item] = time.monotonic()
+            self.job_tree.set(item, "status", "Queued")
+            self.job_tree.set(item, "duration", "")
+            worker = threading.Thread(
+                target=self._convert_in_background,
+                args=(
+                    item,
+                    url,
+                    destination,
+                    heading_content,
+                    cancel_event,
+                ),
+                daemon=True,
+            )
+            worker.start()
+        self._schedule_duration_updates()
+        self.status.configure(
+            text=f"Started {len(jobs)} conversion(s); "
+            f"{len(self._running_jobs)} running."
+        )
+        self._schedule_job_button_layout()
+        self._schedule_save()
+
+    def _set_job_status(self, item, text):
+        if self.job_tree.exists(item):
+            self.job_tree.set(item, "status", text)
+        active = self._run_total - self._run_completed
+        self.status.configure(
+            text=f"{text} ({self._run_completed}/{self._run_total} complete; "
+            f"{active} active)"
+        )
+
+    def _convert_in_background(
+        self, item, url, destination, heading_content, cancel_event
+    ):
         warnings = []
         try:
-            if self._cancel_event.is_set():
+            if cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
-            self.root.after(0, self._set_progress, 10, "Fetching the latest reply...")
+            self.root.after(0, self._set_job_status, item, "Fetching")
             skipped_images = []
             text, images = fetch_latest_response_with_images(url, skipped_images)
             if skipped_images:
@@ -4642,7 +5456,7 @@ class ChatGPTToDocxApp:
                     f"{len(skipped_images)} image(s) were skipped and are NOT "
                     "in the Word file:\n- " + "\n- ".join(skipped_images)
                 )
-            if self._cancel_event.is_set():
+            if cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
 
             table_count = _count_markdown_tables(text)
@@ -4657,9 +5471,9 @@ class ChatGPTToDocxApp:
             if table_count or code_count:
                 self.root.after(
                     0,
-                    self._set_progress,
-                    40,
-                    "Capturing table / plain-text screenshots...",
+                    self._set_job_status,
+                    item,
+                    "Capturing screenshots",
                 )
                 capture_error = None
                 try:
@@ -4667,7 +5481,7 @@ class ChatGPTToDocxApp:
                         url,
                         want_tables=bool(table_count),
                         want_code=bool(code_count),
-                        cancel_event=self._cancel_event,
+                        cancel_event=cancel_event,
                         expected_tables=table_count or None,
                     )
                 except RuntimeError as screenshot_error:
@@ -4718,75 +5532,158 @@ class ChatGPTToDocxApp:
                         )
                         code_screenshots = []
 
-            if self._cancel_event.is_set():
+            if cancel_event.is_set():
                 raise RuntimeError("Conversion cancelled.")
-            self.root.after(0, self._set_progress, 75, "Saving Word document...")
-            if not destination:
-                destination = str(default_output_path(text))
-            if self._cancel_event.is_set():
-                raise RuntimeError("Conversion cancelled.")
-            destination = save_docx(
-                text,
-                destination,
-                images,
-                heading_content,
-                table_screenshots=table_screenshots,
-                code_screenshots=code_screenshots,
-            ) or destination
+            self.root.after(0, self._set_job_status, item, "Saving")
+            with _OUTPUT_LOCK:
+                if not destination:
+                    with _OUTPUT_PATHS_LOCK:
+                        candidate = Path(default_output_path(text))
+                        base = candidate
+                        suffix = 2
+                        while (
+                            os.path.normcase(os.path.abspath(candidate))
+                            in self._reserved_output_paths
+                            or candidate.exists()
+                        ):
+                            candidate = base.with_name(
+                                f"{base.stem} ({suffix}){base.suffix}"
+                            )
+                            suffix += 1
+                        destination = str(candidate)
+                        self._reserved_output_paths.add(
+                            os.path.normcase(os.path.abspath(destination))
+                        )
+                if cancel_event.is_set():
+                    raise RuntimeError("Conversion cancelled.")
+                destination = save_docx(
+                    text,
+                    destination,
+                    images,
+                    heading_content,
+                    table_screenshots=table_screenshots,
+                    code_screenshots=code_screenshots,
+                ) or destination
         except RuntimeError as error:
             if str(error) == "Conversion cancelled.":
-                self.root.after(0, self._finish_conversion, None, None, True)
+                self.root.after(0, self._finish_conversion, item, None, None, True)
             else:
-                self.root.after(0, self._finish_conversion, None, error, False)
+                self.root.after(0, self._finish_conversion, item, None, error, False)
         except Exception as error:
-            if self._cancel_event.is_set():
-                self.root.after(0, self._finish_conversion, None, None, True)
+            if cancel_event.is_set():
+                self.root.after(0, self._finish_conversion, item, None, None, True)
                 return
-            self.root.after(0, self._finish_conversion, None, error, False)
+            self.root.after(0, self._finish_conversion, item, None, error, False)
         else:
             self.root.after(
                 0,
                 self._finish_conversion,
+                item,
                 destination,
                 None,
                 False,
                 tuple(warnings),
             )
 
-    def _finish_conversion(self, destination, error, cancelled=False, warnings=()):
-        self.progress.configure(value=100)
+    def _finish_conversion(
+        self, item, destination, error, cancelled=False, warnings=()
+    ):
+        self._running_jobs.pop(item, None)
+        self._run_completed += 1
+        self._record_job_duration(item)
+        if not self._running_jobs:
+            self._stop_duration_updates()
+        job_destination = destination or self.job_tree.set(item, "destination")
+        filename = Path(job_destination).name if job_destination else "the selected reply"
+        if cancelled:
+            final_status = "Cancelled"
+            self.job_tree.set(item, "status", final_status)
+            if self.notify_var.get():
+                _notify_windows(
+                    "ChatGPT to Word - cancelled",
+                    f"Cancelled conversion for {filename}.",
+                )
+        elif error is not None:
+            final_status = "Failed"
+            self.job_tree.set(item, "status", final_status)
+            self.show_error_dialog(error, modal=False)
+            if self.notify_var.get():
+                _notify_windows(
+                    "ChatGPT to Word - failed",
+                    f"Could not convert {filename}: {str(error)[:140]}",
+                )
+        else:
+            final_status = "Saved with warnings" if warnings else "Saved"
+            self.job_tree.set(item, "status", final_status)
+            self.job_tree.set(item, "destination", destination)
+            if warnings:
+                self.show_warning_dialog(destination, warnings)
+                if self.notify_var.get():
+                    _notify_windows(
+                        "ChatGPT to Word - saved with warnings",
+                        f"{Path(destination).name} was saved with warnings.",
+                    )
+            elif self.notify_var.get():
+                _notify_windows(
+                    "ChatGPT to Word - done",
+                    f"Saved {Path(destination).name}.",
+                )
+        if not self.job_tree.set(item, "copy_destination").strip():
+            default_copy_destination = self._normalize_copy_destination(
+                self.copy_destination_default_var.get()
+            )
+            if default_copy_destination:
+                self.job_tree.set(
+                    item, "copy_destination", default_copy_destination
+                )
+        self._run_statuses[item] = final_status
+        self._schedule_save()
+        self._schedule_job_button_layout()
+
+        self.progress.configure(
+            value=100 * self._run_completed / max(self._run_total, 1)
+        )
+        if self._running_jobs:
+            self.status.configure(
+                text=f"{self._run_completed}/{self._run_total} conversion(s) complete; "
+                f"{len(self._running_jobs)} still running."
+            )
+            return
+
         self.progress.grid_remove()
         self.convert_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
-        self._cancel_event.clear()
-        if cancelled:
-            self.status.configure(text="Conversion cancelled.")
+        self.add_job_button.configure(state="normal")
+        self.remove_job_button.configure(state="normal")
+        self.browse_destination_button.configure(state="normal")
+        self.clear_all_button.configure(
+            state="disabled" if self._copying_rows else "normal"
+        )
+        with _OUTPUT_PATHS_LOCK:
+            self._reserved_output_paths = set()
+        statuses = [self._run_statuses[row] for row in self._run_items]
+        failures = statuses.count("Failed")
+        cancelled_count = statuses.count("Cancelled")
+        warning_count = statuses.count("Saved with warnings")
+        if failures:
+            self.status.configure(
+                text=f"{self._run_total - failures - cancelled_count} saved; "
+                f"{failures} failed; {cancelled_count} cancelled."
+            )
             return
-        if error is not None:
-            self.status.configure(text="Conversion failed.")
-            if self.notify_var.get():
-                _notify_windows("ChatGPT to Word - failed", str(error)[:200])
-            self.show_error_dialog(error)
+        if cancelled_count:
+            self.status.configure(
+                text=f"{self._run_total - cancelled_count} saved; "
+                f"{cancelled_count} cancelled."
+            )
             return
-
-        if not self.destination_entry.get().strip():
-            self.destination_entry.insert(0, destination)
-
-        if warnings:
-            self.status.configure(text=f"Saved with warnings: {destination}")
-            if self.notify_var.get():
-                _notify_windows(
-                    "ChatGPT to Word - saved with warnings",
-                    f"{Path(destination).name}: "
-                    + " | ".join(w.split("\n")[0] for w in warnings)[:180],
-                )
-            self.show_warning_dialog(destination, warnings)
+        if warning_count:
+            self.status.configure(
+                text=f"Saved {self._run_completed} conversion(s); "
+                f"{warning_count} with warnings."
+            )
         else:
-            self.status.configure(text=f"Saved: {destination}")
-            if self.notify_var.get():
-                _notify_windows(
-                    "ChatGPT to Word - done", f"Saved {Path(destination).name}"
-                )
+            self.status.configure(text=f"Saved {self._run_completed} conversion(s).")
 def main():
     _bind_children_to_process_lifetime()
     root = tk.Tk()
