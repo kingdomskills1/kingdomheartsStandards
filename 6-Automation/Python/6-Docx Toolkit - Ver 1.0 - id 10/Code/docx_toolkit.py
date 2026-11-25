@@ -1,6 +1,6 @@
 """GUI for selecting a folder or file, previewing numbered headings, and copying them.
 
-Simple Tkinter-based UI that uses the functions from `copy_number_headings_core.py`.
+Simple Tkinter-based UI that uses the functions from `docx_toolkit_core.py`.
 """
 from pathlib import Path
 import sys
@@ -8,7 +8,7 @@ import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from copy_number_headings_core import (
+from docx_toolkit_core import (
     _numbered_heading_indices,
     extract_headings_from_docx,
     extract_headings_with_sources_from_docx,
@@ -36,7 +36,7 @@ def clean_name(text: str) -> str:
 class HeadingGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Copy & Number Headings")
+        self.title("DOCX Toolkit")
         self.geometry("900x600")
 
         self.folder_path = None
@@ -82,6 +82,12 @@ class HeadingGUI(tk.Tk):
             frm_left_buttons,
             text="Copy Clean Folder Name",
             command=self.copy_clean_folder_name
+        ).pack(side="left", padx=4, pady=4)
+
+        ttk.Button(
+            frm_left_buttons,
+            text="Resize DOCX",
+            command=self.open_docx_shrinker
         ).pack(side="left", padx=4, pady=4)
 
         preview_panes = ttk.Panedwindow(right_frame, orient=tk.VERTICAL)
@@ -265,6 +271,22 @@ class HeadingGUI(tk.Tk):
         self.clipboard_clear()
         self.clipboard_append(clean)
         messagebox.showinfo("Copied", "Clean folder name copied")
+
+    def open_docx_shrinker(self):
+        try:
+            from shrink_docx import run_gui
+        except ImportError as error:
+            messagebox.showerror(
+                "DOCX resizer unavailable",
+                "Could not load the DOCX resizer. Install its dependency with "
+                "'pip install Pillow'.\n\n{}".format(error),
+                parent=self,
+            )
+            return
+
+        selected = self.lst_files.curselection()
+        initial_path = self.files[selected[0]] if selected else self.folder_path
+        run_gui(self, initial_path)
 
     def refresh_file_list(self):
         self.lst_files.delete(0, tk.END)

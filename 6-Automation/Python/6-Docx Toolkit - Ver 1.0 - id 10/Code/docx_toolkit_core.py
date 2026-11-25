@@ -1,5 +1,5 @@
 """
-Core functions for extracting and numbering headings from .docx files.
+Core functions for DOCX Toolkit heading extraction and numbering.
 Supports Heading 1 through Heading 9.
 """
 from __future__ import annotations
