@@ -64,8 +64,19 @@ class WordDocumentInserter:
         return self._word_call(lambda: word.Documents.Open(full)), True
 
     def _destination_range(self, doc):
+        paragraph_count = self._word_call(lambda: doc.Paragraphs.Count)
+        last_paragraph = self._word_call(
+            lambda: doc.Paragraphs(paragraph_count)
+        )
+        last_text = self._word_call(
+            lambda: last_paragraph.Range.Text
+        ).rstrip("\r\x07")
+
         rng = self._word_call(lambda: doc.Content)
         self._word_call(lambda: rng.Collapse(WD_COLLAPSE_END))
+        if last_text and not last_text.endswith("\v"):
+            self._word_call(lambda: rng.InsertBefore("\r"))
+            self._word_call(lambda: rng.Collapse(WD_COLLAPSE_END))
         return rng
 
     def _preserve_inserted_fonts(self, source_doc, destination_doc, insertion_start):

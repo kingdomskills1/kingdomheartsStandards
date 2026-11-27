@@ -5065,18 +5065,14 @@ class ChatGPTToDocxApp:
             with _WORD_COPY_LOCK:
                 manager_path = (
                     Path(__file__).resolve().parent
-                    / "word_document_insertion"
                     / "word_document_inserter.py"
                 )
                 if not manager_path.is_file() and getattr(sys, "frozen", False):
                     executable_directory = Path(sys.executable).resolve().parent
                     candidates = (
-                        executable_directory
-                        / "word_document_insertion"
-                        / "word_document_inserter.py",
+                        executable_directory / "word_document_inserter.py",
                         executable_directory.parent
                         / "Code"
-                        / "word_document_insertion"
                         / "word_document_inserter.py",
                     )
                     manager_path = next(

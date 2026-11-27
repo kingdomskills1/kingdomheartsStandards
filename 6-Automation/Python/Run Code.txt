@@ -10,5 +10,6 @@ python doc_text_formatter.py
 
 
 Build the .exe
-pyinstaller --onefile --windowed copy_number_headings.py
+pyinstaller --onefile --windowed docx_toolkit.py
 pyinstaller --onefile --windowed --icon="Image Studio Icon.ico" --add-data="Image Studio Icon.ico;." main.py
+python -m PyInstaller --onefile --windowed --noconfirm --clean --name "ChatGPT_to_DOCX" --add-data "word_document_inserter.py:." --hidden-import=win32com --hidden-import=win32com.client --hidden-import=pythoncom --hidden-import=pywintypes --collect-submodules win32com --collect-submodules win32 chatgpt_to_docx.py
